@@ -63,6 +63,16 @@ test("creates a stable block link", () => {
   assert.equal(createQuestionLink("行测/2025.md", "q66", "第 66 题"), "[[行测/2025.md#^q66|第 66 题]]");
 });
 
+test("saved fold markers never become part of question titles or copied links", () => {
+  for (const fold of ["+", "-"]) {
+    const folded = source.replace("[!exam-question]", `[!exam-question]${fold}`);
+    const question = findExamQuestions(folded)[0];
+    assert.equal(question.title, "第 66 题");
+    assert.equal(createQuestionLink("行测/2025.md", question.blockId, question.title), "[[行测/2025.md#^q66|第 66 题]]");
+    assert.match(copyQuestionMarkdown(folded, question), /66\. 题干文字/);
+  }
+});
+
 test("adds an option footnote within one question", () => {
   const question = findExamQuestions(source)[0];
   const start = source.indexOf("A.甲");

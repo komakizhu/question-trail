@@ -1,6 +1,6 @@
 /** Pure Markdown operations used by the Obsidian plugin and its tests. */
 
-const QUESTION_HEADER = /^>\s*\[!exam-question\]\s*(?<title>.*)$/;
+const QUESTION_HEADER = /^>\s*\[!exam-question\][+-]?\s*(?<title>.*)$/;
 const CALLOUT_LINE = /^>\s?(.*)$/;
 const BLOCK_ID = /^\^([A-Za-z0-9_-]+)\s*$/;
 const PERSONAL_FOOTNOTE = /^exam-[A-Za-z0-9_-]+-note-(\d+)$/;
@@ -98,7 +98,7 @@ function calloutByBlockId(source, blockId) {
   while (header >= 0 && lines[header].line.trim() === "") header -= 1;
   while (header >= 0 && lines[header].line.startsWith(">")) header -= 1;
   header += 1;
-  const headerMatch = lines[header]?.line.match(/^>\s*\[!([^\]]+)\]\s*(.*)$/);
+  const headerMatch = lines[header]?.line.match(/^>\s*\[!([^\]]+)\][+-]?\s*(.*)$/);
   if (!headerMatch) return null;
   const innerLines = [];
   let cursor = header + 1;

@@ -1,6 +1,6 @@
 {
   "id": "obsidian-exam-notes",
-  "name": "题目卡片（Exam Notes）",
+  "name": "题迹（Question Trail）",
   "version": "0.2.0",
   "minAppVersion": "1.5.0",
   "description": "为公考试卷题目 Callout 提供复制、双链和选项脚注操作。",

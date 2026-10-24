@@ -1,4 +1,5 @@
 import { Notice, Plugin, TFile } from "obsidian";
+import { registerCalloutFoldSync } from "./callout-fold-sync";
 import {
   copyQuestionMarkdown,
   createQuestionLink,
@@ -19,6 +20,7 @@ function questionNumberFromTitle(title: string): string | null {
 
 export default class ExamNotesPlugin extends Plugin {
   async onload() {
+    registerCalloutFoldSync(this);
     this.addCommand({
       id: "copy-exam-question",
       name: "复制当前题目",

@@ -23,10 +23,206 @@ __export(main_exports, {
   default: () => ExamNotesPlugin
 });
 module.exports = __toCommonJS(main_exports);
+var import_obsidian2 = require("obsidian");
+
+// src/callout-fold-sync.ts
 var import_obsidian = require("obsidian");
+var import_view = require("@codemirror/view");
+
+// src/callout-folds.js
+function findCallouts(source) {
+  const records = [];
+  const stack = [];
+  let offset = 0;
+  let previousDepth = 0;
+  let fence = null;
+  const lines = source.split("\n");
+  for (let line = 0; line < lines.length; line += 1) {
+    const raw = lines[line];
+    const prefix = raw.match(/^(?: {0,3}>[ \t]?)+/)?.[0] ?? "";
+    const depth = (prefix.match(/>/g) ?? []).length;
+    const content = raw.slice(prefix.length).replace(/\r$/, "");
+    while (stack.length && stack.at(-1).depth > depth) {
+      Object.assign(stack.pop(), { endLine: line, to: offset });
+    }
+    if (fence && depth < fence.depth) fence = null;
+    if (fence) {
+      const closing = content.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (depth === fence.depth && closing?.[1][0] === fence.char && closing[1].length >= fence.length) fence = null;
+    } else {
+      const opening = content.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (opening) {
+        fence = { depth, char: opening[1][0], length: opening[1].length };
+      } else if (depth > previousDepth) {
+        const header = content.match(/^(\[!([^\]|]+)(?:\|[^\]]*)?\])([+-]?)(?:[ \t]|$)/);
+        if (header) {
+          const record = {
+            line,
+            endLine: lines.length,
+            from: offset,
+            to: source.length,
+            depth,
+            type: header[2].toLowerCase(),
+            fold: header[3],
+            marker: offset + prefix.length + header[1].length
+          };
+          records.push(record);
+          stack.push(record);
+        }
+      }
+    }
+    previousDepth = depth;
+    offset += raw.length + 1;
+  }
+  return records;
+}
+function withoutFoldStates(source) {
+  const parts = [];
+  let from = 0;
+  for (const item of findCallouts(source)) {
+    if (!item.fold) continue;
+    parts.push(source.slice(from, item.marker), "?");
+    from = item.marker + 1;
+  }
+  parts.push(source.slice(from));
+  return parts.join("");
+}
+function setCalloutFold(current, snapshot, record, collapsed) {
+  if (!record?.fold) return null;
+  if (current !== snapshot && withoutFoldStates(current) !== withoutFoldStates(snapshot)) return null;
+  const sign = collapsed ? "-" : "+";
+  return current.slice(0, record.marker) + sign + current.slice(record.marker + 1);
+}
+function matchRenderedCallout(records, renderedTypes, index) {
+  if (index < 0 || records.length !== renderedTypes.length) return null;
+  if (records.some((item, i) => item.type !== renderedTypes[i])) return null;
+  return records[index] ?? null;
+}
+
+// src/callout-fold-sync.ts
+function calloutsWithin(element) {
+  return [
+    ...element.matches(".callout") ? [element] : [],
+    ...Array.from(element.querySelectorAll(".callout"))
+  ];
+}
+function clickedCallout(event) {
+  const target = event.target;
+  if (event.button !== 0 || !target?.closest) return null;
+  if (target.closest("a, button, input, select, textarea")) return null;
+  const title = target.closest(".callout-title");
+  const callout = title?.parentElement;
+  return callout?.matches(".callout.is-collapsible") ? callout : null;
+}
+function afterNativeToggle(callout, before, isDisposed, save) {
+  setTimeout(() => {
+    if (isDisposed()) return;
+    setTimeout(() => {
+      if (isDisposed()) return;
+      const collapsed = callout.classList.contains("is-collapsed");
+      if (collapsed !== before) save(collapsed);
+    }, 0);
+  }, 0);
+}
+var CalloutFoldEditor = class {
+  constructor(view) {
+    this.view = view;
+    this.disposed = false;
+    this.onClick = (event) => {
+      const callout = clickedCallout(event);
+      if (!callout || callout.closest(".internal-embed, .markdown-embed")) return;
+      let root = callout;
+      while (root.parentElement?.closest(".callout")) root = root.parentElement.closest(".callout");
+      const source = this.view.state.doc.toString();
+      let line;
+      try {
+        line = this.view.state.doc.lineAt(this.view.posAtDOM(root, 0)).number - 1;
+      } catch {
+        return;
+      }
+      const records = findCallouts(source);
+      const parent = records.find((item) => item.line === line);
+      if (!parent) return;
+      const rendered = calloutsWithin(root);
+      const record = matchRenderedCallout(
+        records.filter((item) => item.line >= parent.line && item.line < parent.endLine),
+        rendered.map((el) => el.dataset.callout ?? ""),
+        rendered.indexOf(callout)
+      );
+      if (!record?.fold) return;
+      afterNativeToggle(callout, callout.classList.contains("is-collapsed"), () => this.disposed, (collapsed) => {
+        const current = this.view.state.doc.toString();
+        const updated = setCalloutFold(current, source, record, collapsed);
+        if (updated !== null && updated !== current) {
+          this.view.dispatch({ changes: { from: record.marker, to: record.marker + 1, insert: collapsed ? "-" : "+" } });
+        }
+      });
+    };
+    view.dom.addEventListener("click", this.onClick, true);
+  }
+  update(update) {
+    if (!update.docChanged || !update.transactions.some((tr) => tr.isUserEvent("input") || tr.isUserEvent("delete"))) return;
+    const records = findCallouts(update.state.doc.toString());
+    const markers = /* @__PURE__ */ new Set();
+    update.changes.iterChangedRanges((_fromA, _toA, from, to) => {
+      for (const record of records) {
+        if (record.fold !== "-" || from >= record.to || to <= record.from) continue;
+        if (from >= record.marker && to <= record.marker + 1) continue;
+        markers.add(record.marker);
+      }
+    });
+    if (!markers.size) return;
+    queueMicrotask(() => {
+      if (this.disposed || this.view.state.doc !== update.state.doc) return;
+      this.view.dispatch({ changes: [...markers].sort((a, b) => a - b).map((from) => ({ from, to: from + 1, insert: "+" })) });
+    });
+  }
+  destroy() {
+    this.disposed = true;
+    this.view.dom.removeEventListener("click", this.onClick, true);
+  }
+};
+function registerCalloutFoldSync(plugin) {
+  plugin.registerEditorExtension(import_view.ViewPlugin.fromClass(CalloutFoldEditor));
+  plugin.registerMarkdownPostProcessor((element, context) => {
+    if (!element.matches(".callout.is-collapsible") && !element.querySelector(".callout.is-collapsible")) return;
+    if (!context.getSectionInfo(element)) return;
+    const child = new import_obsidian.MarkdownRenderChild(element);
+    let disposed = false;
+    child.register(() => {
+      disposed = true;
+    });
+    child.registerDomEvent(element, "click", (event) => {
+      const callout = clickedCallout(event);
+      if (!callout || !element.contains(callout)) return;
+      const section = context.getSectionInfo(callout);
+      if (!section) return;
+      const rendered = calloutsWithin(element);
+      const record = matchRenderedCallout(
+        findCallouts(section.text).filter((item) => item.line >= section.lineStart && item.line <= section.lineEnd),
+        rendered.map((el) => el.dataset.callout ?? ""),
+        rendered.indexOf(callout)
+      );
+      if (!record?.fold) return;
+      afterNativeToggle(callout, callout.classList.contains("is-collapsed"), () => disposed, (collapsed) => {
+        const file = plugin.app.vault.getAbstractFileByPath(context.sourcePath);
+        if (!(file instanceof import_obsidian.TFile)) return;
+        void plugin.app.vault.process(file, (current) => {
+          const updated = setCalloutFold(current, section.text, record, collapsed);
+          if (updated === null) throw new Error("\u6587\u6863\u5DF2\u53D8\u5316\uFF0C\u672A\u5199\u5165\u8FC7\u671F\u7684\u6298\u53E0\u4F4D\u7F6E");
+          return updated;
+        }).catch((error) => {
+          console.error("\u9898\u8FF9\uFF1ACallout \u72B6\u6001\u540C\u6B65\u5931\u8D25", error);
+          new import_obsidian.Notice("\u9898\u8FF9\uFF1A\u5C55\u5F00\u72B6\u6001\u672A\u80FD\u4FDD\u5B58\uFF0C\u8BF7\u5728\u6587\u6863\u66F4\u65B0\u540E\u518D\u8BD5\u4E00\u6B21");
+        });
+      });
+    }, true);
+    context.addChild(child);
+  });
+}
 
 // src/markdown.js
-var QUESTION_HEADER = /^>\s*\[!exam-question\]\s*(?<title>.*)$/;
+var QUESTION_HEADER = /^>\s*\[!exam-question\][+-]?\s*(?<title>.*)$/;
 var CALLOUT_LINE = /^>\s?(.*)$/;
 var BLOCK_ID = /^\^([A-Za-z0-9_-]+)\s*$/;
 var PERSONAL_FOOTNOTE = /^exam-[A-Za-z0-9_-]+-note-(\d+)$/;
@@ -115,7 +311,7 @@ function calloutByBlockId(source, blockId) {
   while (header >= 0 && lines[header].line.trim() === "") header -= 1;
   while (header >= 0 && lines[header].line.startsWith(">")) header -= 1;
   header += 1;
-  const headerMatch = lines[header]?.line.match(/^>\s*\[!([^\]]+)\]\s*(.*)$/);
+  const headerMatch = lines[header]?.line.match(/^>\s*\[!([^\]]+)\][+-]?\s*(.*)$/);
   if (!headerMatch) return null;
   const innerLines = [];
   let cursor = header + 1;
@@ -216,8 +412,9 @@ function positionToOffset(source, position) {
 function questionNumberFromTitle(title) {
   return (title.match(/第\s*(\d+)\s*题/) || [])[1] || null;
 }
-var ExamNotesPlugin = class extends import_obsidian.Plugin {
+var ExamNotesPlugin = class extends import_obsidian2.Plugin {
   async onload() {
+    registerCalloutFoldSync(this);
     this.addCommand({
       id: "copy-exam-question",
       name: "\u590D\u5236\u5F53\u524D\u9898\u76EE",
@@ -255,12 +452,12 @@ var ExamNotesPlugin = class extends import_obsidian.Plugin {
   }
   async readFile(path) {
     const abstract = this.app.vault.getAbstractFileByPath(path);
-    if (!(abstract instanceof import_obsidian.TFile)) return null;
+    if (!(abstract instanceof import_obsidian2.TFile)) return null;
     return { file: abstract, source: await this.app.vault.read(abstract) };
   }
   async writeClipboard(value, message) {
     await navigator.clipboard.writeText(value);
-    new import_obsidian.Notice(message);
+    new import_obsidian2.Notice(message);
   }
   questionFromEditor(editor) {
     const source = editor.getValue();
@@ -271,26 +468,26 @@ var ExamNotesPlugin = class extends import_obsidian.Plugin {
   async copyFromEditor(editor, _view) {
     const current = this.questionFromEditor(editor);
     if (!current.question) {
-      new import_obsidian.Notice("\u8BF7\u628A\u5149\u6807\u653E\u5728 exam-question \u9898\u76EE\u5361\u7247\u5185");
+      new import_obsidian2.Notice("\u8BF7\u628A\u5149\u6807\u653E\u5728 exam-question \u9898\u76EE\u5361\u7247\u5185");
       return;
     }
     try {
       await this.writeClipboard(copyQuestionMarkdown(current.source, current.question), "\u9898\u76EE\u5DF2\u590D\u5236");
     } catch (error) {
-      new import_obsidian.Notice(`\u590D\u5236\u5931\u8D25\uFF1A${String(error)}`);
+      new import_obsidian2.Notice(`\u590D\u5236\u5931\u8D25\uFF1A${String(error)}`);
     }
   }
   async copyLinkFromEditor(editor, view) {
     const current = this.questionFromEditor(editor);
     if (!current.question?.blockId || !view.file) {
-      new import_obsidian.Notice("\u5F53\u524D\u5149\u6807\u4E0D\u5728\u53EF\u5F15\u7528\u7684\u9898\u76EE\u5361\u7247\u5185");
+      new import_obsidian2.Notice("\u5F53\u524D\u5149\u6807\u4E0D\u5728\u53EF\u5F15\u7528\u7684\u9898\u76EE\u5361\u7247\u5185");
       return;
     }
     try {
       const link = createQuestionLink(view.file.path, current.question.blockId, current.question.title);
       await this.writeClipboard(link, "\u9898\u76EE\u94FE\u63A5\u5DF2\u590D\u5236");
     } catch (error) {
-      new import_obsidian.Notice(`\u590D\u5236\u94FE\u63A5\u5931\u8D25\uFF1A${String(error)}`);
+      new import_obsidian2.Notice(`\u590D\u5236\u94FE\u63A5\u5931\u8D25\uFF1A${String(error)}`);
     }
   }
   async addFootnoteFromEditor(editor, _view) {
@@ -304,7 +501,7 @@ var ExamNotesPlugin = class extends import_obsidian.Plugin {
       const line = editor.getLine(cursor.line);
       const option = line.match(/\b[A-D]\.[^\n]*/);
       if (!option) {
-        new import_obsidian.Notice("\u8BF7\u9009\u62E9\u4E00\u4E2A\u9009\u9879\u7247\u6BB5\uFF0C\u6216\u628A\u5149\u6807\u653E\u5728 A-D \u9009\u9879\u884C");
+        new import_obsidian2.Notice("\u8BF7\u9009\u62E9\u4E00\u4E2A\u9009\u9879\u7247\u6BB5\uFF0C\u6216\u628A\u5149\u6807\u653E\u5728 A-D \u9009\u9879\u884C");
         return;
       }
       start = positionToOffset(source, { line: cursor.line, ch: option.index ?? 0 });
@@ -314,7 +511,7 @@ var ExamNotesPlugin = class extends import_obsidian.Plugin {
     }
     const question = findQuestionAtOffsets(source, start, end);
     if (!question) {
-      new import_obsidian.Notice("\u9009\u9879\u5FC5\u987B\u5B8C\u5168\u4F4D\u4E8E\u540C\u4E00\u9053 exam-question \u9898\u76EE\u5185");
+      new import_obsidian2.Notice("\u9009\u9879\u5FC5\u987B\u5B8C\u5168\u4F4D\u4E8E\u540C\u4E00\u9053 exam-question \u9898\u76EE\u5185");
       return;
     }
     const note = window.prompt("\u9009\u9879\u811A\u6CE8", "")?.trim();
@@ -327,9 +524,9 @@ var ExamNotesPlugin = class extends import_obsidian.Plugin {
       const separator = editor.getValue().endsWith("\n") ? "\n" : "\n\n";
       editor.replaceRange(`${separator}${result.definition}
 `, endPosition, endPosition);
-      new import_obsidian.Notice("\u9009\u9879\u811A\u6CE8\u5DF2\u6DFB\u52A0");
+      new import_obsidian2.Notice("\u9009\u9879\u811A\u6CE8\u5DF2\u6DFB\u52A0");
     } catch (error) {
-      new import_obsidian.Notice(`\u6DFB\u52A0\u811A\u6CE8\u5931\u8D25\uFF1A${String(error)}`);
+      new import_obsidian2.Notice(`\u6DFB\u52A0\u811A\u6CE8\u5931\u8D25\uFF1A${String(error)}`);
     }
   }
   async addRenderedActions(callout, sourcePath, sourceLine) {
@@ -375,25 +572,25 @@ var ExamNotesPlugin = class extends import_obsidian.Plugin {
   async copyRenderedQuestion(sourcePath, title, sourceLine) {
     const found = await this.findRenderedQuestion(sourcePath, title, sourceLine);
     if (!found) {
-      new import_obsidian.Notice("\u627E\u4E0D\u5230\u5BF9\u5E94\u7684\u9898\u76EE\u6E90\u6587\u672C");
+      new import_obsidian2.Notice("\u627E\u4E0D\u5230\u5BF9\u5E94\u7684\u9898\u76EE\u6E90\u6587\u672C");
       return;
     }
     try {
       await this.writeClipboard(copyQuestionMarkdown(found.source, found.question), "\u9898\u76EE\u5DF2\u590D\u5236");
     } catch (error) {
-      new import_obsidian.Notice(`\u590D\u5236\u5931\u8D25\uFF1A${String(error)}`);
+      new import_obsidian2.Notice(`\u590D\u5236\u5931\u8D25\uFF1A${String(error)}`);
     }
   }
   async copyRenderedLink(sourcePath, title, sourceLine) {
     const found = await this.findRenderedQuestion(sourcePath, title, sourceLine);
     if (!found?.question.blockId) {
-      new import_obsidian.Notice("\u627E\u4E0D\u5230\u5BF9\u5E94\u7684\u9898\u76EE\u5757\u7F16\u53F7");
+      new import_obsidian2.Notice("\u627E\u4E0D\u5230\u5BF9\u5E94\u7684\u9898\u76EE\u5757\u7F16\u53F7");
       return;
     }
     try {
       await this.writeClipboard(createQuestionLink(found.file.path, found.question.blockId, found.question.title), "\u9898\u76EE\u94FE\u63A5\u5DF2\u590D\u5236");
     } catch (error) {
-      new import_obsidian.Notice(`\u590D\u5236\u94FE\u63A5\u5931\u8D25\uFF1A${String(error)}`);
+      new import_obsidian2.Notice(`\u590D\u5236\u94FE\u63A5\u5931\u8D25\uFF1A${String(error)}`);
     }
   }
 };

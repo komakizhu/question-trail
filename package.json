@@ -6,10 +6,12 @@
   "description": "Obsidian plugin for public-exam question callouts",
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "test:obsidian": "node tests/run-callout-fold-runtime.mjs",
     "build": "tsc --noEmit && node esbuild.config.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@codemirror/view": "6.43.13",
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.0",
     "obsidian": "^1.7.2",
