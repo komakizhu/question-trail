@@ -1,6 +1,6 @@
 # 题迹（Question Trail）
 
-版本：`0.2.0`
+版本：`0.2.1`
 
 这是“公考试卷识别”Skill 的 Obsidian 配套插件，服务于 `exam-lite-v1` 题目导出。它只处理 `exam-question` 题目 Callout，不改写普通 Callout，也不会在打开文件时重写 Markdown。MinerU 只是上游候选解析器，插件不依赖 MinerU 运行。
 
