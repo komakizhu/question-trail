@@ -1,4 +1,5 @@
 import esbuild from "esbuild";
+import { readFileSync, writeFileSync } from "node:fs";
 
 await esbuild.build({
   entryPoints: ["src/main.ts"],
@@ -11,3 +12,7 @@ await esbuild.build({
   sourcemap: false,
   logLevel: "info",
 });
+
+// Keep generated dependency-comment blank lines clean for consistent diffs.
+const bundle = readFileSync("main.js", "utf8");
+writeFileSync("main.js", bundle.replace(/^[\t ]+$/gm, ""));

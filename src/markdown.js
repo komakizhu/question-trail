@@ -38,7 +38,7 @@ function parseQuestionAt(lines, index) {
   while (scan < Math.min(lines.length, blockLine + 8)) {
     const materialLine = lines[scan].line.match(/^材料：(.+)$/);
     if (materialLine) {
-      for (const match of materialLine[1].matchAll(/#\^([A-Za-z0-9_-]+)/g)) materialIds.push(match[1]);
+      for (const match of materialLine[1].matchAll(/\[\[#\^([A-Za-z0-9_-]+)(?:\|[^\]]*)?\]\]/g)) materialIds.push(match[1]);
     }
     if (lines[scan].line.startsWith("> [!success]") || lines[scan].line.startsWith("> [!note]")) break;
     scan += 1;

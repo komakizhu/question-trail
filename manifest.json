@@ -1,9 +1,9 @@
 {
   "id": "obsidian-exam-notes",
   "name": "题迹（Question Trail）",
-  "version": "0.2.1",
+  "version": "0.5.2",
   "minAppVersion": "1.5.0",
-  "description": "为公考试卷题目 Callout 提供复制、双链和选项脚注操作。",
+  "description": "题迹：作答标记、透明题组、独立历史与公考批改 Skill 同步。",
   "author": "公考批改 Skill",
   "isDesktopOnly": false
 }
