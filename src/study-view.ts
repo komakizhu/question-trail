@@ -45,6 +45,45 @@ class StudyExtraCalloutEditor {
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text = ""): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag); el.className = className; el.textContent = text; return el;
 }
+/** Turn tab-indented note lists into valid Markdown only in reading view. */
+function normalizeIndentedNoteCallout(raw: string): string | null {
+  const sourceLines = raw.split("\n");
+  if (!/^>\s*\[!note\][+-]?\s*我的笔记\s*$/.test(sourceLines[0] ?? "")) return null;
+  // Remove the quote marker without consuming a tab: the tab is the source's
+  // indentation signal and must be normalized rather than discarded.
+  const bodyLines = sourceLines.slice(1).map(line => line.replace(/^> ?/, ""));
+  if (!bodyLines.some(line => /^[\t ]*\t[\t ]*[-*+]\s+/.test(line))) return null;
+
+  const output: string[] = [];
+  let listOpen = false;
+  for (const line of bodyLines) {
+    if (!line.trim()) { output.push(""); continue; }
+    const match = line.match(/^([ \t]*)(.*)$/)!;
+    const sourceIndent = match[1];
+    const tabs = (sourceIndent.match(/\t/g) ?? []).length;
+    const spaces = sourceIndent.replace(/\t/g, "").length;
+    const content = match[2];
+    const marker = content.match(/^([-*+]\s+|\d+[.)]\s+)/);
+    if (marker) {
+      const indent = spaces + Math.max(0, tabs - 1) * 2;
+      if (!listOpen && output.length && output.at(-1)?.trim()) output.push("");
+      output.push(" ".repeat(indent) + content);
+      listOpen = true;
+      continue;
+    }
+    if (listOpen && tabs > 0) {
+      const indent = spaces + Math.max(2, tabs * 2 - 2);
+      output.push(" ".repeat(indent) + content);
+      continue;
+    }
+    if (listOpen && !sourceIndent) {
+      if (output.length && output.at(-1)?.trim()) output.push("");
+      listOpen = false;
+    }
+    output.push(sourceIndent.replace(/\t/g, "  ") + content);
+  }
+  return output.join("\n");
+}
 function button(label: string, action: () => void): HTMLButtonElement {
   const el = node("button", "qt-study-button", label); el.type = "button";
   el.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); action(); });
@@ -432,7 +471,7 @@ export async function registerQuestionStudy(plugin: Plugin) {
   plugin.registerEvent(plugin.app.vault.on("rename", (file, oldPath) => { void store.rename(oldPath, file.path).catch(report); }));
   plugin.registerMarkdownPostProcessor(async (element, context) => {
     // Editable source retains native editing; nested Markdown rendering must not recurse.
-    if (element.closest(".markdown-source-view, .qt-study-body")) return;
+    if (element.closest(".markdown-source-view, .qt-study-body, .qt-study-note-rendering")) return;
     const section = context.getSectionInfo(element);
     if (!section) return;
     if (section.text !== cachedSource) { cachedSource = section.text; cachedQuestions = studyQuestions(section.text); cachedGroups = studyGroups(section.text); }
@@ -486,6 +525,27 @@ export async function registerQuestionStudy(plugin: Plugin) {
       await MarkdownRenderer.render(plugin.app, raw.replace(/^(标签[：:])(?=\S)/gm, "$1 "), normalized, context.sourcePath, child);
       element.replaceChildren(...Array.from(normalized.childNodes));
       child.register(() => { element.replaceChildren(...original); });
+    }
+    const normalizedNote = normalizeIndentedNoteCallout(raw);
+    const detailContent = element.querySelector<HTMLElement>(":scope > .callout-content");
+    if (normalizedNote && detailContent) {
+      const references = new Map<string, HTMLElement[]>();
+      detailContent.querySelectorAll<HTMLElement>("sup.footnote-ref").forEach(ref => {
+        const id = ref.querySelector("a")?.getAttribute("data-footref");
+        if (id) { const list = references.get(id) ?? []; list.push(ref); references.set(id, list); }
+      });
+      const definitions = [...references.keys()].map(id => `[^${id}]: .`).join("\n");
+      const normalized = node("div", "qt-study-note-rendering");
+      await MarkdownRenderer.render(plugin.app, normalizedNote + (definitions ? "\n\n" + definitions : ""), normalized, context.sourcePath, child);
+      normalized.querySelectorAll(".footnotes").forEach(el => el.remove());
+      normalized.querySelectorAll<HTMLElement>("sup.footnote-ref").forEach(ref => {
+        const id = ref.querySelector("a")?.getAttribute("data-footref");
+        const original = id && references.get(id)?.shift();
+        if (original) ref.replaceWith(original.cloneNode(true));
+      });
+      const original = Array.from(detailContent.childNodes);
+      detailContent.replaceChildren(...Array.from(normalized.childNodes));
+      child.register(() => { detailContent.replaceChildren(...original); });
     }
     element.classList.add("qt-study-extra"); spaceTags(element);
     const lastExtra = owner.extras.at(-1);

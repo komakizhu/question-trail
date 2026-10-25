@@ -4114,6 +4114,44 @@ function node(tag, className = "", text = "") {
   el.textContent = text;
   return el;
 }
+function normalizeIndentedNoteCallout(raw) {
+  const sourceLines = raw.split("\n");
+  if (!/^>\s*\[!note\][+-]?\s*我的笔记\s*$/.test(sourceLines[0] ?? "")) return null;
+  const bodyLines = sourceLines.slice(1).map((line) => line.replace(/^> ?/, ""));
+  if (!bodyLines.some((line) => /^[\t ]*\t[\t ]*[-*+]\s+/.test(line))) return null;
+  const output = [];
+  let listOpen = false;
+  for (const line of bodyLines) {
+    if (!line.trim()) {
+      output.push("");
+      continue;
+    }
+    const match = line.match(/^([ \t]*)(.*)$/);
+    const sourceIndent = match[1];
+    const tabs = (sourceIndent.match(/\t/g) ?? []).length;
+    const spaces = sourceIndent.replace(/\t/g, "").length;
+    const content2 = match[2];
+    const marker = content2.match(/^([-*+]\s+|\d+[.)]\s+)/);
+    if (marker) {
+      const indent = spaces + Math.max(0, tabs - 1) * 2;
+      if (!listOpen && output.length && output.at(-1)?.trim()) output.push("");
+      output.push(" ".repeat(indent) + content2);
+      listOpen = true;
+      continue;
+    }
+    if (listOpen && tabs > 0) {
+      const indent = spaces + Math.max(2, tabs * 2 - 2);
+      output.push(" ".repeat(indent) + content2);
+      continue;
+    }
+    if (listOpen && !sourceIndent) {
+      if (output.length && output.at(-1)?.trim()) output.push("");
+      listOpen = false;
+    }
+    output.push(sourceIndent.replace(/\t/g, "  ") + content2);
+  }
+  return output.join("\n");
+}
 function button(label, action) {
   const el = node("button", "qt-study-button", label);
   el.type = "button";
@@ -4639,7 +4677,7 @@ async function registerQuestionStudy(plugin) {
     void store.rename(oldPath, file.path).catch(report);
   }));
   plugin.registerMarkdownPostProcessor(async (element, context) => {
-    if (element.closest(".markdown-source-view, .qt-study-body")) return;
+    if (element.closest(".markdown-source-view, .qt-study-body, .qt-study-note-rendering")) return;
     const section = context.getSectionInfo(element);
     if (!section) return;
     if (section.text !== cachedSource) {
@@ -4711,6 +4749,33 @@ async function registerQuestionStudy(plugin) {
       element.replaceChildren(...Array.from(normalized.childNodes));
       child.register(() => {
         element.replaceChildren(...original);
+      });
+    }
+    const normalizedNote = normalizeIndentedNoteCallout(raw);
+    const detailContent = element.querySelector(":scope > .callout-content");
+    if (normalizedNote && detailContent) {
+      const references = /* @__PURE__ */ new Map();
+      detailContent.querySelectorAll("sup.footnote-ref").forEach((ref) => {
+        const id = ref.querySelector("a")?.getAttribute("data-footref");
+        if (id) {
+          const list = references.get(id) ?? [];
+          list.push(ref);
+          references.set(id, list);
+        }
+      });
+      const definitions = [...references.keys()].map((id) => `[^${id}]: .`).join("\n");
+      const normalized = node("div", "qt-study-note-rendering");
+      await import_obsidian2.MarkdownRenderer.render(plugin.app, normalizedNote + (definitions ? "\n\n" + definitions : ""), normalized, context.sourcePath, child);
+      normalized.querySelectorAll(".footnotes").forEach((el) => el.remove());
+      normalized.querySelectorAll("sup.footnote-ref").forEach((ref) => {
+        const id = ref.querySelector("a")?.getAttribute("data-footref");
+        const original2 = id && references.get(id)?.shift();
+        if (original2) ref.replaceWith(original2.cloneNode(true));
+      });
+      const original = Array.from(detailContent.childNodes);
+      detailContent.replaceChildren(...Array.from(normalized.childNodes));
+      child.register(() => {
+        detailContent.replaceChildren(...original);
       });
     }
     element.classList.add("qt-study-extra");
