@@ -1,0 +1,176 @@
+<div id="qt-prototype">
+<style>
+#qt-prototype{--qt-text:var(--text-normal,inherit);--qt-muted:var(--text-muted,currentColor);--qt-line:var(--background-modifier-border,color-mix(in srgb,currentColor 18%,transparent));--qt-orange:color-mix(in srgb,var(--color-orange,light-dark(#cf711c,#f5a455)) 22%,transparent);--qt-red:color-mix(in srgb,var(--color-red,light-dark(#c54150,#ef8590)) 20%,transparent);--qt-green:color-mix(in srgb,var(--color-green,light-dark(#368154,#87cfa2)) 18%,transparent);color:var(--qt-text);font-family:var(--font-interface,inherit);font-size:var(--font-text-size,15px);line-height:1.65;padding:12px 0;background:transparent;box-sizing:border-box}
+#qt-prototype *{box-sizing:border-box}
+#qt-prototype [hidden]{display:none!important}
+#qt-prototype .qt-window{max-width:700px;margin:auto;background:transparent}
+#qt-prototype .qt-small{font-size:12px;color:var(--qt-muted)}
+#qt-prototype .qt-page{padding:0;background:transparent}
+#qt-prototype .qt-callout{background:transparent;border:1px solid var(--qt-line);border-radius:7px}
+#qt-prototype .qt-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;background:transparent}
+#qt-prototype .qt-title{font-weight:500}
+#qt-prototype .qt-content{padding:18px 16px}
+#qt-prototype .qt-mode{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:14px}
+#qt-prototype .qt-mode-label{font-size:12px;color:var(--qt-muted);font-weight:500}
+#qt-prototype .qt-question{margin:0 0 18px}
+#qt-prototype button,#qt-prototype select{font:inherit;color:inherit;background:transparent;border:1px solid var(--qt-line);border-radius:6px;padding:6px 11px}
+#qt-prototype select option{color:var(--text-normal,CanvasText);background:var(--background-primary,Canvas)}
+#qt-prototype button:disabled{opacity:.45;cursor:not-allowed}
+#qt-prototype button:hover:not(:disabled){border-color:currentColor}
+#qt-prototype button.qt-primary{font-weight:500;border-color:currentColor}
+#qt-prototype .qt-option{display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;margin:8px 0;border-radius:7px;border:1px solid var(--qt-line);background:transparent}
+#qt-prototype .qt-option[data-tone="uncertain"]{background:var(--qt-orange)}
+#qt-prototype .qt-option[data-tone="wrong"]{background:var(--qt-red)}
+#qt-prototype .qt-option[data-tone="uncertain-wrong"]{background:linear-gradient(90deg,var(--qt-orange) 0%,var(--qt-orange) 50%,var(--qt-red) 50%,var(--qt-red) 100%)}
+#qt-prototype .qt-option[data-tone="correct"]{background:var(--qt-green)}
+#qt-prototype .qt-letter{display:grid;place-items:center;width:34px;height:34px;padding:0;font-weight:500;border:1px solid var(--qt-line);border-radius:50%;background:transparent}
+#qt-prototype .qt-letter[aria-pressed="true"]{border:2px solid currentColor}
+#qt-prototype .qt-option[data-chosen="true"]{box-shadow:inset 0 0 0 1px currentColor}
+#qt-prototype .qt-option-body{min-width:0}
+#qt-prototype .qt-mark{max-width:100px;font-size:12px;padding:6px}
+#qt-prototype .qt-mark-wrap{position:relative}
+#qt-prototype .qt-mark-trigger{width:34px;height:34px;padding:0;border-color:transparent;color:var(--qt-muted)}
+#qt-prototype .qt-mark-palette{position:absolute;right:0;top:calc(100% + 4px);z-index:10;display:flex;gap:4px;padding:6px;background:var(--background-primary,Canvas);color:var(--text-normal,CanvasText);border:1px solid var(--qt-line);border-radius:7px;box-shadow:0 3px 12px color-mix(in srgb,currentColor 12%,transparent)}
+#qt-prototype .qt-mark-choice{display:grid;place-items:center;width:40px;height:40px;padding:0;border-color:transparent}
+#qt-prototype .qt-mark-choice[aria-pressed="true"]{border-color:currentColor}
+#qt-prototype .qt-mark-choice[data-set-mark="uncertain"]{color:var(--color-orange,light-dark(#b95b0b,#f5a455))}
+#qt-prototype .qt-bottom{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-top:18px}
+#qt-prototype .qt-result{font-size:13px}
+#qt-prototype .qt-notes{margin-top:18px;border-top:1px solid var(--qt-line);padding-top:12px}
+#qt-prototype details{padding:8px 0}
+#qt-prototype summary{font-weight:500}
+#qt-prototype details p{margin:10px 0 2px;color:var(--qt-muted);font-size:13px}
+#qt-prototype .qt-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@media(max-width:480px){#qt-prototype{padding:8px 0}#qt-prototype .qt-content{padding:14px 10px}#qt-prototype .qt-head{padding:10px}#qt-prototype .qt-option{gap:7px;padding:9px 7px}#qt-prototype .qt-mark{max-width:84px}}
+@media(pointer:coarse){#qt-prototype button,#qt-prototype select,#qt-prototype summary{min-height:44px}#qt-prototype .qt-letter,#qt-prototype .qt-mark-trigger,#qt-prototype .qt-mark-choice{width:44px}#qt-prototype .qt-option{grid-template-columns:44px minmax(0,1fr) auto}}
+</style>
+<div class="qt-window">
+  <div class="qt-page">
+    <article class="qt-callout" aria-label="示例题的复盘与重做">
+      <div class="qt-head"><span class="qt-title">第 01 题</span><button type="button" id="qt-toggle" class="cursor-interaction">重做</button></div>
+      <div class="qt-content">
+        <div class="qt-mode"><span id="qt-mode" class="qt-mode-label">复盘</span><label id="qt-history-label" class="qt-small">作答记录 <select id="qt-history" aria-label="作答记录" class="qt-mark cursor-interaction"></select></label></div>
+        <p class="qt-question">小林从甲地开车到乙地，去程速度为 60 千米/小时，沿原路返回时速度为 40 千米/小时。整个往返过程的平均速度是多少？</p>
+        <div id="qt-options" role="group" aria-label="题目选项"></div>
+        <div class="qt-bottom" id="qt-bottom" hidden><span class="qt-result" id="qt-result" role="status" aria-live="polite"></span><button type="button" class="qt-primary cursor-interaction" id="qt-check" hidden disabled>核对答案</button></div>
+        <div id="qt-notes" class="qt-notes"></div>
+      </div>
+    </article>
+    <div class="qt-sr-only" id="qt-status" role="status" aria-live="polite"></div>
+  </div>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('qt-prototype');
+  const el = id => root.querySelector('#qt-' + id);
+  const letters = ['A','B','C','D'];
+  const values = ['40','50','48','52'];
+  const markChoices = [['none','未标记','○'],['certain','确定','✓'],['uncertain','犹豫','●'],['excluded','排除','⊘']];
+  const emptyMarks = () => ({A:'none',B:'none',C:'none',D:'none'});
+  const initial = () => ({version:1,mode:'review',index:0,sequence:0,draft:{selected:null,marks:emptyMarks()},records:[{label:'初次作答',selected:'B',marks:{A:'excluded',B:'uncertain',C:'none',D:'excluded'}}]});
+  let state = initial();
+  function restore(snapshot) {
+    const s = snapshot?.privateContent;
+    if (s?.version !== 1 || !['review','redo'].includes(s.mode) || !Array.isArray(s.records) || !s.records.length || !Number.isInteger(s.index) || s.index < 0 || s.index >= s.records.length) return;
+    const validRecord = r => r && letters.includes(r.selected) && typeof r.label === 'string' && r.label.length < 40 && validMarks(r.marks);
+    const validMarks = marks => marks && letters.every(k => ['none','certain','uncertain','excluded'].includes(marks[k]));
+    if (!s.records.every(validRecord) || !s.draft || !(s.draft.selected === null || letters.includes(s.draft.selected)) || !validMarks(s.draft.marks) || !Number.isSafeInteger(s.sequence)) return;
+    state = structuredClone(s);
+  }
+  restore(window.openai?.widgetState);
+  function persist() {
+    const current = state.mode === 'redo' ? state.draft : state.records[state.index];
+    const snapshot = {modelContent:{prototype:'题迹复盘与重做',mode:state.mode,selected:current.selected,marks:current.marks},privateContent:state};
+    if(new TextEncoder().encode(JSON.stringify(snapshot)).length > 16000) return;
+    try { const pending = window.openai?.setWidgetState?.(snapshot); pending?.catch(() => {}); } catch {}
+  }
+  function render(message = '') {
+    const redo = state.mode === 'redo';
+    const current = redo ? state.draft : state.records[state.index];
+    el('mode').textContent = redo ? '重做中' : '复盘';
+    el('toggle').textContent = redo ? '退出重做' : '重做';
+    el('history-label').hidden = redo;
+    el('history').replaceChildren(...state.records.map((record,i) => {const option = document.createElement('option'); option.value = String(i); option.textContent = record.label; return option;}));
+    el('history').value = String(state.index);
+    el('options').replaceChildren(...letters.map((key,i) => {
+      const row = document.createElement('div'); row.className = 'qt-option'; row.dataset.option = key;
+      const mark = current.marks[key];
+      const correct = !redo && key === 'C';
+      const wrong = !redo && current.selected === key && key !== 'C';
+      row.dataset.tone = correct ? 'correct' : wrong ? (mark==='uncertain'?'uncertain-wrong':'wrong') : mark;
+      row.dataset.chosen = String(current.selected === key);
+      row.setAttribute('role','group');
+      row.setAttribute('aria-label',[key,values[i]+' 千米/小时',markChoices.find(choice=>choice[0]===mark)[1],correct?'正确答案':wrong?'错选':'',current.selected===key?'已选':''].filter(Boolean).join('，'));
+      const letter = document.createElement(redo ? 'button' : 'span'); letter.className = 'qt-letter'; letter.textContent = key;
+      if (redo) {letter.type='button';letter.classList.add('cursor-interaction');letter.setAttribute('aria-label','选择 '+key);letter.setAttribute('aria-pressed',String(current.selected===key));letter.dataset.pick=key;}
+      const content = document.createElement('div');content.className='qt-option-body';
+      const text = document.createElement('div');text.textContent=values[i]+' 千米/小时';content.append(text);
+      const controls=document.createElement('div');controls.className='qt-mark-wrap';
+      const trigger=document.createElement('button');trigger.type='button';trigger.className='qt-mark-trigger cursor-interaction';trigger.dataset.markMenu=key;trigger.textContent='···';trigger.setAttribute('aria-label',key+' 的判断');trigger.setAttribute('aria-expanded','false');trigger.setAttribute('aria-controls','qt-palette-'+key);trigger.dataset.tooltip='调整判断';
+      const palette=document.createElement('div');palette.id='qt-palette-'+key;palette.className='qt-mark-palette';palette.hidden=true;palette.setAttribute('role','group');palette.setAttribute('aria-label',key+' 的判断选项');
+      for(const [value,label,symbol] of markChoices){
+        const choice=document.createElement('button');choice.type='button';choice.className='qt-mark-choice cursor-interaction';choice.dataset.setMark=value;choice.dataset.optionKey=key;choice.setAttribute('aria-label',label);choice.setAttribute('aria-pressed',String(mark===value));choice.dataset.tooltip=label;
+        const icon=document.createElement('span');icon.setAttribute('aria-hidden','true');icon.textContent=symbol;choice.append(icon);palette.append(choice);
+      }
+      controls.append(trigger,palette);row.append(letter,content,controls);return row;
+    }));
+    el('check').hidden = !redo;el('check').disabled = !current.selected;
+    el('bottom').hidden = !redo;
+    el('result').textContent = redo ? (current.selected ? '已选 '+current.selected : '未作答') : '';
+    el('notes').hidden=redo;
+    el('notes').innerHTML=redo ? '' : '<details open><summary class="cursor-interaction">答案与解析</summary><p>设单程为 120 千米：去程 2 小时，返程 3 小时。总路程 240 千米 ÷ 总时间 5 小时 = 48 千米/小时，选 C。</p></details><details open><summary class="cursor-interaction">我的笔记</summary><p>第一次错在把两个速度直接取平均。等距离往返，两段用时不同，要用总路程除以总时间。</p></details>';
+    el('status').textContent=message;
+  }
+  el('toggle').addEventListener('click',()=>{
+    if(state.mode==='redo'){state.mode='review';render('已退出，未提交。');}
+    else{state.mode='redo';state.draft={selected:null,marks:emptyMarks()};render('已隐藏答案和旧标记。');}
+    persist();el('toggle').focus();
+  });
+  el('options').addEventListener('click',event=>{
+    const menu=event.target.closest('[data-mark-menu]');
+    if(menu){
+      const palette=root.querySelector('#qt-palette-'+menu.dataset.markMenu);const open=palette.hidden;
+      closePalettes();palette.hidden=!open;menu.setAttribute('aria-expanded',String(open));
+      if(open)palette.querySelector('[aria-pressed="true"]').focus();
+      return;
+    }
+    const choice=event.target.closest('[data-set-mark]');
+    if(choice){
+      const key=choice.dataset.optionKey;const record=state.mode==='redo'?state.draft:state.records[state.index];record.marks[key]=choice.dataset.setMark;
+      if(state.mode==='redo'&&choice.dataset.setMark==='excluded'&&record.selected===key)record.selected=null;
+      render();persist();root.querySelector('[data-mark-menu="'+key+'"]').focus();return;
+    }
+    const button=event.target.closest('[data-pick]');if(!button||state.mode!=='redo')return;
+    const key=button.dataset.pick;state.draft.selected=state.draft.selected===key?null:key;
+    if(state.draft.selected===key&&state.draft.marks[key]==='excluded')state.draft.marks[key]='none';
+    render();persist();root.querySelector('[data-pick="'+key+'"]').focus();
+  });
+  function closePalettes(){
+    root.querySelectorAll('.qt-mark-palette').forEach(p=>{p.hidden=true;});
+    root.querySelectorAll('[data-mark-menu]').forEach(button=>button.setAttribute('aria-expanded','false'));
+  }
+  document.addEventListener('click',event=>{if(!event.target.closest('#qt-prototype .qt-mark-wrap'))closePalettes();});
+  root.addEventListener('keydown',event=>{
+    if(event.key!=='Escape')return;
+    const trigger=root.querySelector('[data-mark-menu][aria-expanded="true"]');
+    if(trigger){event.preventDefault();closePalettes();trigger.focus();}
+  });
+  root.addEventListener('focusout',event=>{
+    const wrap=event.target.closest('.qt-mark-wrap');
+    if(wrap&&!wrap.contains(event.relatedTarget)){
+      wrap.querySelector('.qt-mark-palette').hidden=true;
+      wrap.querySelector('[data-mark-menu]').setAttribute('aria-expanded','false');
+    }
+  });
+  el('check').addEventListener('click',()=>{
+    if(state.mode!=='redo'||!state.draft.selected)return;
+    state.sequence+=1;state.records.push({label:'重做 '+state.sequence,...structuredClone(state.draft)});
+    state.index=state.records.length-1;state.mode='review';
+    render(state.draft.selected==='C'?'答对，记录已保存。':'答错，记录已保存。');persist();el('toggle').focus();
+  });
+  el('history').addEventListener('change',event=>{state.index=Number(event.target.value);render();persist();el('history').focus();});
+  window.addEventListener('openai:set_globals',event=>{if(event.detail?.globals && 'widgetState' in event.detail.globals){restore(event.detail.globals.widgetState);render();}});
+  render();
+})();
+</script>
+</div>
