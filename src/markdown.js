@@ -19,7 +19,50 @@ function stripQuote(line) {
   return match ? match[1] : line;
 }
 
-function parseQuestionAt(lines, index) {
+/** False entries are literal code, display math or table content, never structural markers. */
+export function structuralLineMask(source) {
+  const rows = source.split("\n");
+  const mask = rows.map(() => true);
+  let fence = null, math = null;
+  const contents = rows.map(raw => {
+    const prefix = raw.match(/^(?: {0,3}>[ \t]?)+/)?.[0] ?? "";
+    return { text: raw.slice(prefix.length), depth: (prefix.match(/>/g) ?? []).length };
+  });
+  for (let index = 0; index < rows.length; index += 1) {
+    const { text, depth } = contents[index];
+    if (fence && depth < fence.depth) fence = null;
+    if (math && depth < math.depth) math = null;
+    if (fence) {
+      mask[index] = false;
+      const closing = text.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (depth === fence.depth && closing?.[1][0] === fence.char && closing[1].length >= fence.size) fence = null;
+      continue;
+    }
+    if (math) {
+      mask[index] = false;
+      if (text.trim().endsWith(math.close)) math = null;
+      continue;
+    }
+    const marker = text.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (marker) { mask[index] = false; fence = { char: marker[1][0], size: marker[1].length, depth }; continue; }
+    const opening = text.trim().match(/^(\$\$|\\\[)/)?.[1];
+    if (opening) {
+      mask[index] = false;
+      const close = opening === "$$" ? "$$" : "\\]";
+      if (text.trim().length <= opening.length || !text.trim().endsWith(close)) math = { close, depth };
+      continue;
+    }
+    if (/^(?: {4}|\t)/.test(text) || /^\s*\|/.test(text)) mask[index] = false;
+  }
+  for (let index = 1; index < rows.length; index += 1) {
+    if (!/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(contents[index].text)) continue;
+    mask[index - 1] = false; mask[index] = false;
+    for (let row = index + 1; row < rows.length && contents[row].text.includes("|") && contents[row].text.trim(); row += 1) mask[row] = false;
+  }
+  return mask;
+}
+
+function parseQuestionAt(lines, index, structural) {
   const header = lines[index].line.match(QUESTION_HEADER);
   if (!header) return null;
   let cursor = index + 1;
@@ -35,12 +78,14 @@ function parseQuestionAt(lines, index) {
   const blockId = blockMatch ? blockMatch[1] : null;
   let scan = blockLine + (blockMatch ? 1 : 0);
   const materialIds = [];
-  while (scan < Math.min(lines.length, blockLine + 8)) {
-    const materialLine = lines[scan].line.match(/^材料：(.+)$/);
+  while (scan < lines.length) {
+    const raw = lines[scan].line;
+    if (!structural[scan]) { scan += 1; continue; }
+    if (/^#{1,6}\s|^>\s*\[!exam-(?:question|material)\]|^\[\^[^\]]+\]:/.test(raw)) break;
+    const materialLine = raw.match(/^材料[：:](.+)$/);
     if (materialLine) {
       for (const match of materialLine[1].matchAll(/\[\[#\^([A-Za-z0-9_-]+)(?:\|[^\]]*)?\]\]/g)) materialIds.push(match[1]);
     }
-    if (lines[scan].line.startsWith("> [!success]") || lines[scan].line.startsWith("> [!note]")) break;
     scan += 1;
   }
   const title = header.groups?.title ?? header[1] ?? "";
@@ -53,6 +98,7 @@ function parseQuestionAt(lines, index) {
     innerLines,
     headerLine: index,
     endLine: cursor,
+    metadataEndLine: scan,
     startOffset: lines[index].start,
     endOffset: lines[Math.min(cursor, lines.length - 1)]?.start ?? lines[lines.length - 1]?.end ?? 0,
   };
@@ -61,9 +107,10 @@ function parseQuestionAt(lines, index) {
 export function findExamQuestions(source) {
   const lines = linesWithOffsets(source);
   const questions = [];
+  const structural = structuralLineMask(source);
   for (let index = 0; index < lines.length; index += 1) {
-    if (QUESTION_HEADER.test(lines[index].line)) {
-      const question = parseQuestionAt(lines, index);
+    if (structural[index] && QUESTION_HEADER.test(lines[index].line)) {
+      const question = parseQuestionAt(lines, index, structural);
       if (question) questions.push(question);
     }
   }

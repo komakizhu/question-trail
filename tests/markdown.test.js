@@ -87,3 +87,17 @@ test("strips only plugin personal footnotes", () => {
   const stripped = stripPersonalFootnotes(value);
   assert.equal(stripped, "A B[^source-note]\n\n[^source-note]: source");
 });
+
+test('material references scan the full attached region and stop at real boundaries', () => {
+  const card=(id)=>`> [!exam-question] ${id}\n> 题干\n\n^${id}\n`;
+  const long=card('q1')+'\n题型：单选\n\n标签：\n关联：\n\n附属说明\n\n> [!note]- 我的笔记\n> 说明\n\n材料：[[#^m1|材料一]]\n';
+  assert.deepEqual(findExamQuestions(long)[0].materialIds,['m1']);
+  for(const boundary of ['#### 下一题', '> [!exam-question]+ 下一题','> [!exam-material]- 下一组']) {
+    assert.deepEqual(findExamQuestions(card('q1')+'\n'+boundary+'\n\n材料：[[#^other]]')[0].materialIds,[],boundary);
+  }
+});
+
+test('fake headers and material references in code, display math and tables are ignored', () => {
+  const source=['```md','> [!exam-question] 代码假题','> 假题干','','^fake','```','> [!exam-question] 真题','> 题干','','^q1','','```md','> [!exam-question] 假下一题','材料：[[#^code]]','```','$$','> [!exam-material] 假材料组','材料：[[#^math]]','$$','\\[','#### 假标题','材料：[[#^bracket]]','\\]','| 标记 | 说明 |','| --- | --- |','| 材料：[[#^table]] | 假材料 |','材料：[[#^table2]] | 假材料','--- | ---','材料：[[#^table3]] | 假材料','','材料：[[#^real|真正材料]]'].join('\n');
+  const questions=findExamQuestions(source); assert.equal(questions.length,1); assert.equal(questions[0].blockId,'q1'); assert.deepEqual(questions[0].materialIds,['real']);
+});

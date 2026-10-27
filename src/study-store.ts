@@ -1,8 +1,8 @@
 import { Plugin } from "obsidian";
-import { Attempt, Letter, StudyData, StudyQuestion, emptyAttempt, emptyMarks, groupFoldKey, originalAttempt, questionKey, readStudyData } from "./study-model";
+import { Attempt, Letter, QuestionKind, normalizeLetters, StudyData, StudyQuestion, emptyAttempt, emptyMarks, groupFoldKey, originalAttempt, questionKey, readStudyData } from "./study-model";
 import { ImportedExercise, ImportedQuestion } from "./study-import";
 
-export type Session = { redo: boolean; selected: Letter | null; important: boolean; wholeUncertain: boolean; unknown: boolean; uncertainOptions: Letter[]; wrongOptions: Letter[]; recordId: string | null; busy: boolean };
+export type Session = { redo: boolean; selected: Letter[]; important: boolean; wholeUncertain: boolean; unknown: boolean; uncertainOptions: Letter[]; wrongOptions: Letter[]; recordId: string | null; busy: boolean };
 
 export class StudyStore {
   private data: StudyData;
@@ -10,8 +10,11 @@ export class StudyStore {
   private sessions = new Map<string, Session>();
   private listeners = new Set<() => void>();
   constructor(private plugin: Plugin, private saved: Record<string, unknown>, private sourcePath = "") {
-    if (Object.prototype.hasOwnProperty.call(saved, "questionTrailV2") && saved.questionTrailV2 == null) throw new Error("新版作答记录为空值，已停止写入以保护原数据");
-    this.data = readStudyData(Object.prototype.hasOwnProperty.call(saved, "questionTrailV2") ? saved.questionTrailV2 : saved.questionTrail);
+    const hasV3 = Object.prototype.hasOwnProperty.call(saved, "questionTrailV3");
+    const hasV2 = Object.prototype.hasOwnProperty.call(saved, "questionTrailV2");
+    if (hasV3 && (!saved.questionTrailV3 || typeof saved.questionTrailV3 !== "object" || (saved.questionTrailV3 as {version?: number}).version !== 3)) throw new Error("新版作答记录无法读取，已停止写入以保护原数据");
+    if (!hasV3 && hasV2 && saved.questionTrailV2 == null) throw new Error("新版作答记录为空值，已停止写入以保护原数据");
+    this.data = readStudyData(hasV3 ? saved.questionTrailV3 : hasV2 ? saved.questionTrailV2 : saved.questionTrail);
   }
   get sharedMaterialDefaultExpanded(): boolean {
     const settings = this.saved.questionTrailSettings;
@@ -20,7 +23,7 @@ export class StudyStore {
     return typeof value === "boolean" ? value : true;
   }
   session(key: string): Session {
-    if (!this.sessions.has(key)) this.sessions.set(key, { redo: false, selected: null, ...emptyAttempt(), recordId: null, busy: false });
+    if (!this.sessions.has(key)) this.sessions.set(key, { redo: false, selected: [], ...emptyAttempt(), recordId: null, busy: false });
     return this.sessions.get(key)!;
   }
   records(key: string, question: StudyQuestion): Attempt[] { return this.data.questions[key] ?? [originalAttempt(question)]; }
@@ -35,7 +38,7 @@ export class StudyStore {
     });
     for (const key of keys) {
       const session = this.session(key);
-      if (!session.redo) Object.assign(session, { redo: true, selected: null, ...emptyAttempt() });
+      if (!session.redo) Object.assign(session, { redo: true, selected: [], ...emptyAttempt() });
     }
     this.emit();
   }
@@ -70,10 +73,14 @@ export class StudyStore {
   }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   emit() { this.listeners.forEach(listener => listener()); }
-  start(key: string) { Object.assign(this.session(key), { redo: true, selected: null, ...emptyAttempt() }); this.emit(); }
+  start(key: string) { Object.assign(this.session(key), { redo: true, selected: [], ...emptyAttempt() }); this.emit(); }
   exit(key: string) { this.session(key).redo = false; this.emit(); }
-  pick(key: string, letter: Letter) {
-    const s = this.session(key); s.selected = s.selected === letter ? null : letter;
+  pick(key: string, letter: Letter, kind: QuestionKind = "single") {
+    const s = this.session(key);
+    if (s.busy || kind === "subjective") return;
+    s.selected = kind === "multiple"
+      ? normalizeLetters(s.selected.includes(letter) ? s.selected.filter(item => item !== letter) : [...s.selected, letter])
+      : s.selected.includes(letter) ? [] : [letter];
     this.emit();
   }
   async toggleFlag(key: string, q: StudyQuestion, flag: "important" | "wholeUncertain" | "unknown") {
@@ -107,6 +114,7 @@ export class StudyStore {
     const targetIds = new Set<string>();
     for (const { imported, question } of rows) {
       if (!imported.supported || !imported.questionId || !question.blockId) throw new Error("导入条目缺少受支持的题目身份");
+      if (question.kind !== "single" || question.options.length !== 4 || imported.type !== "single") throw new Error("旧导入格式仅支持四选项单选题目标");
       if (sourceIds.has(imported.questionId)) throw new Error(`导入批次存在重复来源题目：${imported.questionId}`);
       if (targetIds.has(question.blockId)) throw new Error(`多个来源题目指向同一目标块：^${question.blockId}`);
       if (imported.answer !== null && !["A", "B", "C", "D"].includes(imported.answer)) throw new Error("导入答案无法映射到 A–D");
@@ -133,7 +141,7 @@ export class StudyStore {
           : [imported.answer, uncertainOptions, wrongOptions, imported.important, imported.wholeUncertain, imported.unknown, imported.note, imported.review, imported.result]);
         if (latest?.source?.fingerprint === fingerprint) { skipped++; continue; }
         const revision = (latest?.source?.revision ?? 0) + 1;
-        records.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), selected: imported.answer, answer: question.answer, marks: emptyMarks(), important: imported.important, wholeUncertain: imported.wholeUncertain, unknown: imported.unknown, uncertainOptions, wrongOptions, source: { paperId: exercise.paperId, paperVersion: exercise.paperVersion, attemptId: exercise.attemptId, questionId: imported.questionId, fingerprint, revision, note: syncOnly ? "" : imported.note, review: syncOnly ? false : imported.review, result: syncOnly ? "" : imported.result } });
+        records.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), kind: question.kind, selected: imported.answer === null ? [] : [imported.answer], answer: question.answer === null ? null : [...question.answer], marks: emptyMarks(), important: imported.important, wholeUncertain: imported.wholeUncertain, unknown: imported.unknown, uncertainOptions, wrongOptions, source: { paperId: exercise.paperId, paperVersion: exercise.paperVersion, attemptId: exercise.attemptId, questionId: imported.questionId, fingerprint, revision, note: syncOnly ? "" : imported.note, review: syncOnly ? false : imported.review, result: syncOnly ? "" : imported.result } });
         data.bindings[identity] = { path: sourcePath, blockId: question.blockId }; added++;
       }
     });
@@ -143,7 +151,7 @@ export class StudyStore {
   private mutate(change: (data: StudyData) => void): Promise<void> {
     const task = this.tail.then(async () => {
       const next = structuredClone(this.data); change(next);
-      const saved = { ...this.saved, questionTrailV2: next };
+      const saved = { ...this.saved, questionTrailV3: next };
       await this.plugin.saveData(saved);
       this.data = next; this.saved = saved;
     });
@@ -151,13 +159,13 @@ export class StudyStore {
     return task;
   }
   applyRecord(key: string, q: StudyQuestion, record: Attempt) {
-    const s = this.session(key); s.recordId = record.id; s.selected = record.selected;
+    const s = this.session(key); s.recordId = record.id; s.selected = [...record.selected];
     s.important = record.important; s.wholeUncertain = record.wholeUncertain; s.unknown = record.unknown; s.uncertainOptions = [...record.uncertainOptions]; s.wrongOptions = [...record.wrongOptions];
   }
   async submit(key: string, q: StudyQuestion) {
     const s = this.session(key);
-    if (!s.redo || s.busy || (!s.selected && !s.important && !s.wholeUncertain && !s.unknown && !s.uncertainOptions.length && !s.wrongOptions.length)) return;
-    const attempt: Attempt = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), selected: s.selected, answer: q.answer, marks: emptyMarks(), ...emptyAttempt(), important: s.important, wholeUncertain: s.wholeUncertain, unknown: s.unknown, uncertainOptions: [...s.uncertainOptions], wrongOptions: [...s.wrongOptions] };
+    if (!s.redo || s.busy || (q.kind !== "subjective" && !s.selected.length && !s.important && !s.wholeUncertain && !s.unknown && !s.uncertainOptions.length && !s.wrongOptions.length)) return;
+    const attempt: Attempt = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), kind: q.kind, selected: normalizeLetters(s.selected), answer: q.answer === null ? null : [...q.answer], marks: emptyMarks(), ...emptyAttempt(), important: s.important, wholeUncertain: s.wholeUncertain, unknown: s.unknown, uncertainOptions: [...s.uncertainOptions], wrongOptions: [...s.wrongOptions] };
     s.busy = true; this.emit();
     try {
       await this.mutate(data => { (data.questions[key] ??= [originalAttempt(q)]).push(attempt); });

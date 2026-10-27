@@ -1,0 +1,4 @@
+interface:
+  display_name: "题迹（Question Trail）"
+  short_description: "将指定笔记整理为题迹题目，先预览确认再批量应用，保留原文与编号"
+  default_prompt: "使用 $question-trail 检查我明确指定的 Markdown 文件，整理单选、多选、判断和主观题；先展示完整原文与建议文本，经我确认后逐文件应用并验证。"

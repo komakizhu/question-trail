@@ -3434,7 +3434,53 @@ function stripQuote(line) {
   const match = line.match(CALLOUT_LINE);
   return match ? match[1] : line;
 }
-function parseQuestionAt(lines, index) {
+function structuralLineMask(source) {
+  const rows = source.split("\n");
+  const mask = rows.map(() => true);
+  let fence = null, math = null;
+  const contents = rows.map((raw) => {
+    const prefix = raw.match(/^(?: {0,3}>[ \t]?)+/)?.[0] ?? "";
+    return { text: raw.slice(prefix.length), depth: (prefix.match(/>/g) ?? []).length };
+  });
+  for (let index = 0; index < rows.length; index += 1) {
+    const { text, depth } = contents[index];
+    if (fence && depth < fence.depth) fence = null;
+    if (math && depth < math.depth) math = null;
+    if (fence) {
+      mask[index] = false;
+      const closing = text.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (depth === fence.depth && closing?.[1][0] === fence.char && closing[1].length >= fence.size) fence = null;
+      continue;
+    }
+    if (math) {
+      mask[index] = false;
+      if (text.trim().endsWith(math.close)) math = null;
+      continue;
+    }
+    const marker = text.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      mask[index] = false;
+      fence = { char: marker[1][0], size: marker[1].length, depth };
+      continue;
+    }
+    const opening = text.trim().match(/^(\$\$|\\\[)/)?.[1];
+    if (opening) {
+      mask[index] = false;
+      const close = opening === "$$" ? "$$" : "\\]";
+      if (text.trim().length <= opening.length || !text.trim().endsWith(close)) math = { close, depth };
+      continue;
+    }
+    if (/^(?: {4}|\t)/.test(text) || /^\s*\|/.test(text)) mask[index] = false;
+  }
+  for (let index = 1; index < rows.length; index += 1) {
+    if (!/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(contents[index].text)) continue;
+    mask[index - 1] = false;
+    mask[index] = false;
+    for (let row = index + 1; row < rows.length && contents[row].text.includes("|") && contents[row].text.trim(); row += 1) mask[row] = false;
+  }
+  return mask;
+}
+function parseQuestionAt(lines, index, structural) {
   const header = lines[index].line.match(QUESTION_HEADER);
   if (!header) return null;
   let cursor = index + 1;
@@ -3450,12 +3496,17 @@ function parseQuestionAt(lines, index) {
   const blockId = blockMatch ? blockMatch[1] : null;
   let scan = blockLine + (blockMatch ? 1 : 0);
   const materialIds = [];
-  while (scan < Math.min(lines.length, blockLine + 8)) {
-    const materialLine = lines[scan].line.match(/^材料：(.+)$/);
+  while (scan < lines.length) {
+    const raw = lines[scan].line;
+    if (!structural[scan]) {
+      scan += 1;
+      continue;
+    }
+    if (/^#{1,6}\s|^>\s*\[!exam-(?:question|material)\]|^\[\^[^\]]+\]:/.test(raw)) break;
+    const materialLine = raw.match(/^材料[：:](.+)$/);
     if (materialLine) {
       for (const match of materialLine[1].matchAll(/\[\[#\^([A-Za-z0-9_-]+)(?:\|[^\]]*)?\]\]/g)) materialIds.push(match[1]);
     }
-    if (lines[scan].line.startsWith("> [!success]") || lines[scan].line.startsWith("> [!note]")) break;
     scan += 1;
   }
   const title = header.groups?.title ?? header[1] ?? "";
@@ -3468,6 +3519,7 @@ function parseQuestionAt(lines, index) {
     innerLines,
     headerLine: index,
     endLine: cursor,
+    metadataEndLine: scan,
     startOffset: lines[index].start,
     endOffset: lines[Math.min(cursor, lines.length - 1)]?.start ?? lines[lines.length - 1]?.end ?? 0
   };
@@ -3475,9 +3527,10 @@ function parseQuestionAt(lines, index) {
 function findExamQuestions(source) {
   const lines = linesWithOffsets(source);
   const questions = [];
+  const structural = structuralLineMask(source);
   for (let index = 0; index < lines.length; index += 1) {
-    if (QUESTION_HEADER.test(lines[index].line)) {
-      const question = parseQuestionAt(lines, index);
+    if (structural[index] && QUESTION_HEADER.test(lines[index].line)) {
+      const question = parseQuestionAt(lines, index, structural);
       if (question) questions.push(question);
     }
   }
@@ -3598,13 +3651,42 @@ function insertOptionFootnote(source, question, start, end, note) {
 }
 
 // src/study-model.ts
-var letters = ["A", "B", "C", "D"];
-var emptyMarks = () => ({ A: "none", B: "none", C: "none", D: "none" });
+var letters = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"];
+var legacyLetters = letters.slice(0, 4);
+var normalizeLetters = (values) => [...new Set(values)].sort((a, b) => letters.indexOf(a) - letters.indexOf(b));
+var emptyMarks = () => Object.fromEntries(letters.map((letter2) => [letter2, "none"]));
 var emptyAttempt = () => ({ important: false, wholeUncertain: false, unknown: false, uncertainOptions: [], wrongOptions: [] });
 var questionKey = (path, blockId) => JSON.stringify([path, blockId]);
 var groupFoldKey = (path, materialId, kind) => JSON.stringify([path, materialId, kind]);
-var originalAttempt = (q) => ({ id: "original", createdAt: null, selected: q.original, answer: q.answer, marks: emptyMarks(), ...emptyAttempt() });
-var asLetter = (value) => letters.includes(value) ? value : null;
+var originalAttempt = (q) => ({ id: "original", createdAt: null, kind: q.kind, selected: [...q.original], answer: q.answer === null ? null : [...q.answer], marks: emptyMarks(), ...emptyAttempt() });
+function parseAnswer(value, kind, options) {
+  if (!value?.trim() || kind === "subjective") return null;
+  const text = value.trim().replace(/[。；;]$/, "").trim();
+  if (kind === "judgment") {
+    const matches = options.flatMap((option, index) => option.trim() === text ? [letters[index]] : []);
+    if (matches.length === 1) return matches;
+  }
+  if (!/^[A-Z](?:[\s,，、|]*[A-Z])*$/.test(text)) return null;
+  const values = text.match(/[A-Z]/g);
+  if (new Set(values).size !== values.length || values.some((letter2) => letters.indexOf(letter2) >= options.length) || kind !== "multiple" && values.length !== 1) return null;
+  return normalizeLetters(values);
+}
+function questionParts(innerLines, kind) {
+  if (kind === "subjective") return [innerLines.join("\n").trim()];
+  const parts = [""];
+  let index = 0;
+  const structural = structuralLineMask(innerLines.join("\n"));
+  for (const [lineIndex, line] of innerLines.entries()) {
+    const option = structural[lineIndex] ? line.match(/^ {0,3}([A-Z])[.．、)）]\s*(.*)$/) : null;
+    if (option) {
+      if (option[1] !== letters[index] || index >= letters.length) return null;
+      index += 1;
+      parts[index] = option[2];
+    } else parts[index] += "\n" + line;
+  }
+  if (index < 2 || parts.slice(1).some((part) => !part.trim()) || !kind && index !== 4 || kind === "judgment" && index !== 2) return null;
+  return parts.map((part) => part.trim());
+}
 function displayHeadingStart(lines, question) {
   for (let line = question.headerLine - 1; line >= 0; line -= 1) {
     const value = lines[line].trim();
@@ -3617,6 +3699,7 @@ function displayHeadingStart(lines, question) {
 function studyQuestions(source) {
   const lines = source.split("\n");
   const callouts = findCallouts(source);
+  const structural = structuralLineMask(source);
   const questions = findExamQuestions(source);
   const counts = /* @__PURE__ */ new Map();
   questions.forEach((q) => {
@@ -3624,37 +3707,44 @@ function studyQuestions(source) {
   });
   return questions.flatMap((q) => {
     if (!q.blockId || counts.get(q.blockId) !== 1) return [];
-    const parts = [""];
-    let index = 0;
-    for (const line of q.innerLines) {
-      const option = line.match(/^\s*([A-D])[.．、)）]\s*(.*)$/);
-      if (option) {
-        if (option[1] !== letters[index]) return [];
-        index += 1;
-        parts[index] = option[2];
-      } else parts[index] += "\n" + line;
-    }
-    if (index !== 4 || parts.slice(1).some((p) => !p.trim())) return [];
-    let end = q.endLine;
-    while (end < lines.length && !/^#{1,6}\s|^>\s*\[!exam-question\]|^>\s*\[!exam-material\]|^\[\^[^\]]+\]:/.test(lines[end])) end += 1;
+    const end = q.metadataEndLine;
+    const declarations = lines.slice(q.endLine, end).filter((line, index) => structural[q.endLine + index] && /^题型[：:]/.test(line));
+    const kinds = /* @__PURE__ */ new Map([["\u5355\u9009", "single"], ["\u591A\u9009", "multiple"], ["\u5224\u65AD", "judgment"], ["\u4E3B\u89C2\u9898", "subjective"]]);
+    const declaredKind = declarations.length === 1 ? kinds.get(declarations[0].replace(/^题型[：:]\s*/, "").trim()) ?? null : null;
+    if (declarations.length && !declaredKind) return [];
+    const parts = questionParts(q.innerLines, declaredKind);
+    if (!parts) return [];
+    const kind = declaredKind ?? "single";
+    const options = parts.slice(1);
     const extras = [];
     let answer = null;
-    let original = null;
+    let answerBlocks = 0;
+    let original = [];
     for (let line = q.endLine; line < end; line += 1) {
       if (/^(标签|关联)[：:]/.test(lines[line])) {
         const start = line;
-        while (line + 1 < end && lines[line + 1].trim() && !/^>|^#|^\^/.test(lines[line + 1])) line += 1;
+        while (line + 1 < end && lines[line + 1].trim() && !/^>|^#|^\^|^题型[：:]/.test(lines[line + 1])) line += 1;
         extras.push({ start, end: line + 1, kind: "metadata" });
       }
     }
-    for (const block of callouts.filter((c) => c.depth === 1 && c.line >= q.endLine && c.endLine <= end)) {
+    for (const block of callouts.filter((c) => c.depth === 1 && c.line >= q.endLine && c.endLine <= end && structural[c.line])) {
       const header = lines[block.line];
       if (!/^>\s*\[!(success|note)\][+-]?\s*(答案与解析|我的笔记)\s*$/.test(header)) continue;
       extras.push({ start: block.line, end: block.endLine, kind: "detail" });
       const body = lines.slice(block.line + 1, block.endLine).map((l) => l.replace(/^>\s?/, "")).join("\n");
-      if (block.type === "success") answer = asLetter(body.match(/^\s*(?:参考答案|正确答案|答案)[：:]\s*([A-D])(?:\s|[。.,，；;]|$)/m)?.[1]);
-      original || (original = asLetter(body.match(/^\s*(?:我的答案|我的作答)[：:]\s*([A-D])(?:\s|[。.,，；;]|$)/m)?.[1]));
+      if (block.type === "success") {
+        answerBlocks += 1;
+        const declarations2 = lines.slice(block.line + 1, block.endLine).flatMap((line, index) => {
+          if (!structural[block.line + 1 + index]) return [];
+          const match = line.replace(/^>\s?/, "").match(/^\s*(?:参考答案|正确答案|答案)[：:]([^\n]*)$/);
+          return match ? [match[1]] : [];
+        });
+        answer = answerBlocks === 1 && declarations2.length === 1 ? parseAnswer(declarations2[0], kind, options) : null;
+      }
+      if (!original.length) original = parseAnswer(body.match(/^\s*(?:我的答案|我的作答)[：:]([^\n]*)$/m)?.[1], kind, options) ?? [];
     }
+    const referenceCount = lines.slice(q.endLine, end).filter((line, index) => structural[q.endLine + index] && /^\s*(?:参考答案|正确答案|答案)[：:]/.test(line.replace(/^>\s?/, ""))).length;
+    if (referenceCount !== 1) answer = null;
     return [{
       blockId: q.blockId,
       title: q.title,
@@ -3663,8 +3753,9 @@ function studyQuestions(source) {
       endLine: q.endLine,
       rangeEndLine: Math.max(q.endLine, end - 1),
       materialIds: [...q.materialIds],
-      stem: parts[0].trim(),
-      options: parts.slice(1).map((s) => s.trim()),
+      kind,
+      stem: parts[0],
+      options,
       answer,
       original,
       extras
@@ -3721,38 +3812,50 @@ function studyGroups(source) {
   return groups;
 }
 function readStudyData(value) {
-  if (value === void 0 || value === null) return { version: 2, questions: {}, bindings: {}, groupFolds: {} };
+  if (value === void 0 || value === null) return { version: 3, questions: {}, bindings: {}, groupFolds: {} };
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("\u4F5C\u7B54\u8BB0\u5F55\u683C\u5F0F\u65E0\u6CD5\u8BFB\u53D6");
   const data = value;
-  if (data.version !== 1 && data.version !== 2 || !data.questions || typeof data.questions !== "object" || Array.isArray(data.questions)) throw new Error("\u4F5C\u7B54\u8BB0\u5F55\u683C\u5F0F\u65E0\u6CD5\u8BFB\u53D6");
+  if (![1, 2, 3].includes(data.version) || !data.questions || typeof data.questions !== "object" || Array.isArray(data.questions)) throw new Error("\u4F5C\u7B54\u8BB0\u5F55\u683C\u5F0F\u65E0\u6CD5\u8BFB\u53D6");
+  const isLetters = (items, allowed = letters) => Array.isArray(items) && items.every((item) => typeof item === "string" && allowed.includes(item)) && new Set(items).size === items.length;
   const questions = {};
   for (const [key, attempts] of Object.entries(data.questions)) {
-    const identity = JSON.parse(key);
+    let identity;
+    try {
+      identity = JSON.parse(key);
+    } catch {
+      throw new Error("\u9898\u76EE\u7F16\u53F7\u65E0\u6548");
+    }
     if (!Array.isArray(identity) || identity.length !== 2 || !identity.every((v) => typeof v === "string")) throw new Error("\u9898\u76EE\u7F16\u53F7\u65E0\u6548");
     if (!Array.isArray(attempts) || !attempts.length) throw new Error("\u4F5C\u7B54\u8BB0\u5F55\u4E3A\u7A7A");
     const ids = /* @__PURE__ */ new Set();
-    for (const a of attempts) {
-      if (!a || typeof a.id !== "string" || ids.has(a.id) || !(a.createdAt === null || typeof a.createdAt === "string") || !(a.selected === null || letters.includes(a.selected)) || !(a.answer === null || letters.includes(a.answer)) || !a.marks || !letters.every((k) => ["none", "certain", "uncertain", "excluded"].includes(a.marks[k]))) throw new Error("\u4F5C\u7B54\u8BB0\u5F55\u635F\u574F");
-      ids.add(a.id);
-    }
-    questions[key] = attempts.map((raw) => {
-      const old = raw;
-      if (data.version === 2) {
-        if (typeof old.important !== "boolean" || typeof old.wholeUncertain !== "boolean" || typeof old.unknown !== "boolean" || !Array.isArray(old.uncertainOptions) || old.uncertainOptions.some((letter2) => !letters.includes(letter2))) throw new Error("\u65B0\u7248\u4F5C\u7B54\u8BB0\u5F55\u6807\u8BB0\u65E0\u6548");
-      }
-      if (old.wrongOptions !== void 0 && (!Array.isArray(old.wrongOptions) || old.wrongOptions.some((letter2) => !letters.includes(letter2)))) throw new Error("\u9009\u9879\u9519\u9879\u6807\u8BB0\u65E0\u6548");
+    questions[key] = attempts.map((old) => {
+      const v3 = data.version === 3;
+      const validAnswer = v3 ? old?.answer === null || isLetters(old?.answer) && old.answer.length > 0 : old?.answer === null || legacyLetters.includes(old?.answer);
+      const validSelected = v3 ? isLetters(old?.selected) : old?.selected === null || legacyLetters.includes(old?.selected);
+      const kind = v3 ? old?.kind : "single";
+      if (!old || typeof old.id !== "string" || ids.has(old.id) || !(old.createdAt === null || typeof old.createdAt === "string") || !validAnswer || !validSelected || !["single", "multiple", "judgment", "subjective"].includes(kind) || !old.marks || typeof old.marks !== "object" || Array.isArray(old.marks) || !(v3 ? letters : legacyLetters).every((letter2) => ["none", "certain", "uncertain", "excluded"].includes(old.marks[letter2]))) throw new Error("\u4F5C\u7B54\u8BB0\u5F55\u635F\u574F");
+      ids.add(old.id);
+      const selected = v3 ? normalizeLetters(old.selected) : old.selected === null ? [] : [old.selected];
+      const answer = old.answer === null ? null : v3 ? normalizeLetters(old.answer) : [old.answer];
+      if (kind !== "multiple" && (selected.length > 1 || (answer?.length ?? 0) > 1) || kind === "subjective" && (selected.length > 0 || answer !== null)) throw new Error("\u9898\u578B\u4E0E\u4F5C\u7B54\u8BB0\u5F55\u4E0D\u7B26");
+      const allowed = v3 ? letters : legacyLetters;
+      if (data.version >= 2 && (typeof old.important !== "boolean" || typeof old.wholeUncertain !== "boolean" || typeof old.unknown !== "boolean" || !isLetters(old.uncertainOptions, allowed))) throw new Error("\u65B0\u7248\u4F5C\u7B54\u8BB0\u5F55\u6807\u8BB0\u65E0\u6548");
+      if ((v3 || old.wrongOptions !== void 0) && !isLetters(old.wrongOptions, allowed)) throw new Error("\u9009\u9879\u9519\u9879\u6807\u8BB0\u65E0\u6548");
+      if (v3 && old.source !== void 0 && (!old.source || typeof old.source !== "object" || Array.isArray(old.source) || !Number.isInteger(old.source.revision) || old.source.revision <= 0 || typeof old.source.result !== "string")) throw new Error("\u65B0\u7248\u5BFC\u5165\u6765\u6E90\u8BB0\u5F55\u635F\u574F");
       if (old.source && (typeof old.source !== "object" || typeof old.source.paperId !== "string" || typeof old.source.paperVersion !== "string" || typeof old.source.attemptId !== "string" || typeof old.source.questionId !== "string" || typeof old.source.fingerprint !== "string" || typeof old.source.note !== "string" || typeof old.source.review !== "boolean")) throw new Error("\u5BFC\u5165\u6765\u6E90\u8BB0\u5F55\u635F\u574F");
+      if (old.legacyMarks !== void 0 && (!old.legacyMarks || typeof old.legacyMarks !== "object" || Array.isArray(old.legacyMarks) || Object.entries(old.legacyMarks).some(([letter2, mark]) => !allowed.includes(letter2) || mark !== "certain" && mark !== "excluded"))) throw new Error("\u65E7\u9009\u9879\u6807\u8BB0\u635F\u574F");
       const legacyMarks = { ...old.legacyMarks ?? {} };
-      const uncertainOptions = data.version === 2 ? [...new Set(old.uncertainOptions)] : letters.filter((letter2) => old.marks[letter2] === "uncertain");
+      const uncertainOptions = data.version >= 2 ? normalizeLetters(old.uncertainOptions) : legacyLetters.filter((letter2) => old.marks[letter2] === "uncertain");
       if (data.version === 1) {
-        for (const letter2 of letters) if (old.marks[letter2] === "certain" || old.marks[letter2] === "excluded") legacyMarks[letter2] = old.marks[letter2];
+        for (const letter2 of legacyLetters) if (old.marks[letter2] === "certain" || old.marks[letter2] === "excluded") legacyMarks[letter2] = old.marks[letter2];
       }
       const source = old.source ? { ...old.source, revision: Number.isInteger(old.source.revision) && old.source.revision > 0 ? old.source.revision : 1, result: typeof old.source.result === "string" ? old.source.result : "" } : void 0;
-      return { ...old, ...emptyAttempt(), important: data.version === 2 ? old.important : false, wholeUncertain: data.version === 2 ? old.wholeUncertain : false, unknown: data.version === 2 ? old.unknown : false, uncertainOptions, wrongOptions: old.wrongOptions ? [...new Set(old.wrongOptions)] : [], ...source ? { source } : {}, ...Object.keys(legacyMarks).length ? { legacyMarks } : {} };
+      return { ...old, ...emptyAttempt(), kind, selected, answer, marks: { ...emptyMarks(), ...old.marks }, important: data.version >= 2 ? old.important : false, wholeUncertain: data.version >= 2 ? old.wholeUncertain : false, unknown: data.version >= 2 ? old.unknown : false, uncertainOptions, wrongOptions: old.wrongOptions ? normalizeLetters(old.wrongOptions) : [], ...source ? { source } : {}, ...Object.keys(legacyMarks).length ? { legacyMarks } : {} };
     });
   }
-  const bindings = data.version === 2 && data.bindings ? data.bindings : {};
+  const bindings = data.version === 3 ? data.bindings : data.version >= 2 && data.bindings !== void 0 ? data.bindings : {};
   if (!bindings || typeof bindings !== "object" || Array.isArray(bindings) || Object.values(bindings).some((binding) => !binding || typeof binding.path !== "string" || typeof binding.blockId !== "string")) throw new Error("\u5BFC\u5165\u9898\u76EE\u7ED1\u5B9A\u683C\u5F0F\u65E0\u6CD5\u8BFB\u53D6");
-  const groupFolds = data.version === 2 && data.groupFolds ? data.groupFolds : {};
+  const groupFolds = data.version === 3 ? data.groupFolds : data.version >= 2 && data.groupFolds !== void 0 ? data.groupFolds : {};
   if (!groupFolds || typeof groupFolds !== "object" || Array.isArray(groupFolds) || Object.entries(groupFolds).some(([key, value2]) => {
     let identity;
     try {
@@ -3762,7 +3865,7 @@ function readStudyData(value) {
     }
     return !Array.isArray(identity) || identity.length !== 3 || !identity.every((part) => typeof part === "string") || identity[2] !== "group" && identity[2] !== "material" || typeof value2 !== "boolean";
   })) throw new Error("\u9898\u7EC4\u6298\u53E0\u8BB0\u5F55\u683C\u5F0F\u65E0\u6CD5\u8BFB\u53D6");
-  return { version: 2, questions, bindings, groupFolds };
+  return { version: 3, questions, bindings: structuredClone(bindings), groupFolds: { ...groupFolds } };
 }
 
 // src/study-store.ts
@@ -3774,8 +3877,11 @@ var StudyStore = class {
     this.tail = Promise.resolve();
     this.sessions = /* @__PURE__ */ new Map();
     this.listeners = /* @__PURE__ */ new Set();
-    if (Object.prototype.hasOwnProperty.call(saved, "questionTrailV2") && saved.questionTrailV2 == null) throw new Error("\u65B0\u7248\u4F5C\u7B54\u8BB0\u5F55\u4E3A\u7A7A\u503C\uFF0C\u5DF2\u505C\u6B62\u5199\u5165\u4EE5\u4FDD\u62A4\u539F\u6570\u636E");
-    this.data = readStudyData(Object.prototype.hasOwnProperty.call(saved, "questionTrailV2") ? saved.questionTrailV2 : saved.questionTrail);
+    const hasV3 = Object.prototype.hasOwnProperty.call(saved, "questionTrailV3");
+    const hasV2 = Object.prototype.hasOwnProperty.call(saved, "questionTrailV2");
+    if (hasV3 && (!saved.questionTrailV3 || typeof saved.questionTrailV3 !== "object" || saved.questionTrailV3.version !== 3)) throw new Error("\u65B0\u7248\u4F5C\u7B54\u8BB0\u5F55\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u5DF2\u505C\u6B62\u5199\u5165\u4EE5\u4FDD\u62A4\u539F\u6570\u636E");
+    if (!hasV3 && hasV2 && saved.questionTrailV2 == null) throw new Error("\u65B0\u7248\u4F5C\u7B54\u8BB0\u5F55\u4E3A\u7A7A\u503C\uFF0C\u5DF2\u505C\u6B62\u5199\u5165\u4EE5\u4FDD\u62A4\u539F\u6570\u636E");
+    this.data = readStudyData(hasV3 ? saved.questionTrailV3 : hasV2 ? saved.questionTrailV2 : saved.questionTrail);
   }
   get sharedMaterialDefaultExpanded() {
     const settings = this.saved.questionTrailSettings;
@@ -3784,7 +3890,7 @@ var StudyStore = class {
     return typeof value === "boolean" ? value : true;
   }
   session(key) {
-    if (!this.sessions.has(key)) this.sessions.set(key, { redo: false, selected: null, ...emptyAttempt(), recordId: null, busy: false });
+    if (!this.sessions.has(key)) this.sessions.set(key, { redo: false, selected: [], ...emptyAttempt(), recordId: null, busy: false });
     return this.sessions.get(key);
   }
   records(key, question) {
@@ -3805,7 +3911,7 @@ var StudyStore = class {
     });
     for (const key of keys) {
       const session = this.session(key);
-      if (!session.redo) Object.assign(session, { redo: true, selected: null, ...emptyAttempt() });
+      if (!session.redo) Object.assign(session, { redo: true, selected: [], ...emptyAttempt() });
     }
     this.emit();
   }
@@ -3849,16 +3955,17 @@ var StudyStore = class {
     this.listeners.forEach((listener) => listener());
   }
   start(key) {
-    Object.assign(this.session(key), { redo: true, selected: null, ...emptyAttempt() });
+    Object.assign(this.session(key), { redo: true, selected: [], ...emptyAttempt() });
     this.emit();
   }
   exit(key) {
     this.session(key).redo = false;
     this.emit();
   }
-  pick(key, letter2) {
+  pick(key, letter2, kind = "single") {
     const s = this.session(key);
-    s.selected = s.selected === letter2 ? null : letter2;
+    if (s.busy || kind === "subjective") return;
+    s.selected = kind === "multiple" ? normalizeLetters(s.selected.includes(letter2) ? s.selected.filter((item) => item !== letter2) : [...s.selected, letter2]) : s.selected.includes(letter2) ? [] : [letter2];
     this.emit();
   }
   async toggleFlag(key, q, flag) {
@@ -3939,6 +4046,7 @@ var StudyStore = class {
     const targetIds = /* @__PURE__ */ new Set();
     for (const { imported, question } of rows) {
       if (!imported.supported || !imported.questionId || !question.blockId) throw new Error("\u5BFC\u5165\u6761\u76EE\u7F3A\u5C11\u53D7\u652F\u6301\u7684\u9898\u76EE\u8EAB\u4EFD");
+      if (question.kind !== "single" || question.options.length !== 4 || imported.type !== "single") throw new Error("\u65E7\u5BFC\u5165\u683C\u5F0F\u4EC5\u652F\u6301\u56DB\u9009\u9879\u5355\u9009\u9898\u76EE\u6807");
       if (sourceIds.has(imported.questionId)) throw new Error(`\u5BFC\u5165\u6279\u6B21\u5B58\u5728\u91CD\u590D\u6765\u6E90\u9898\u76EE\uFF1A${imported.questionId}`);
       if (targetIds.has(question.blockId)) throw new Error(`\u591A\u4E2A\u6765\u6E90\u9898\u76EE\u6307\u5411\u540C\u4E00\u76EE\u6807\u5757\uFF1A^${question.blockId}`);
       if (imported.answer !== null && !["A", "B", "C", "D"].includes(imported.answer)) throw new Error("\u5BFC\u5165\u7B54\u6848\u65E0\u6CD5\u6620\u5C04\u5230 A\u2013D");
@@ -3967,7 +4075,7 @@ var StudyStore = class {
           continue;
         }
         const revision = (latest?.source?.revision ?? 0) + 1;
-        records.push({ id: crypto.randomUUID(), createdAt: (/* @__PURE__ */ new Date()).toISOString(), selected: imported.answer, answer: question.answer, marks: emptyMarks(), important: imported.important, wholeUncertain: imported.wholeUncertain, unknown: imported.unknown, uncertainOptions, wrongOptions, source: { paperId: exercise.paperId, paperVersion: exercise.paperVersion, attemptId: exercise.attemptId, questionId: imported.questionId, fingerprint, revision, note: syncOnly ? "" : imported.note, review: syncOnly ? false : imported.review, result: syncOnly ? "" : imported.result } });
+        records.push({ id: crypto.randomUUID(), createdAt: (/* @__PURE__ */ new Date()).toISOString(), kind: question.kind, selected: imported.answer === null ? [] : [imported.answer], answer: question.answer === null ? null : [...question.answer], marks: emptyMarks(), important: imported.important, wholeUncertain: imported.wholeUncertain, unknown: imported.unknown, uncertainOptions, wrongOptions, source: { paperId: exercise.paperId, paperVersion: exercise.paperVersion, attemptId: exercise.attemptId, questionId: imported.questionId, fingerprint, revision, note: syncOnly ? "" : imported.note, review: syncOnly ? false : imported.review, result: syncOnly ? "" : imported.result } });
         data.bindings[identity] = { path: sourcePath, blockId: question.blockId };
         added++;
       }
@@ -3979,7 +4087,7 @@ var StudyStore = class {
     const task = this.tail.then(async () => {
       const next = structuredClone(this.data);
       change(next);
-      const saved = { ...this.saved, questionTrailV2: next };
+      const saved = { ...this.saved, questionTrailV3: next };
       await this.plugin.saveData(saved);
       this.data = next;
       this.saved = saved;
@@ -3991,7 +4099,7 @@ var StudyStore = class {
   applyRecord(key, q, record) {
     const s = this.session(key);
     s.recordId = record.id;
-    s.selected = record.selected;
+    s.selected = [...record.selected];
     s.important = record.important;
     s.wholeUncertain = record.wholeUncertain;
     s.unknown = record.unknown;
@@ -4000,8 +4108,8 @@ var StudyStore = class {
   }
   async submit(key, q) {
     const s = this.session(key);
-    if (!s.redo || s.busy || !s.selected && !s.important && !s.wholeUncertain && !s.unknown && !s.uncertainOptions.length && !s.wrongOptions.length) return;
-    const attempt = { id: crypto.randomUUID(), createdAt: (/* @__PURE__ */ new Date()).toISOString(), selected: s.selected, answer: q.answer, marks: emptyMarks(), ...emptyAttempt(), important: s.important, wholeUncertain: s.wholeUncertain, unknown: s.unknown, uncertainOptions: [...s.uncertainOptions], wrongOptions: [...s.wrongOptions] };
+    if (!s.redo || s.busy || q.kind !== "subjective" && !s.selected.length && !s.important && !s.wholeUncertain && !s.unknown && !s.uncertainOptions.length && !s.wrongOptions.length) return;
+    const attempt = { id: crypto.randomUUID(), createdAt: (/* @__PURE__ */ new Date()).toISOString(), kind: q.kind, selected: normalizeLetters(s.selected), answer: q.answer === null ? null : [...q.answer], marks: emptyMarks(), ...emptyAttempt(), important: s.important, wholeUncertain: s.wholeUncertain, unknown: s.unknown, uncertainOptions: [...s.uncertainOptions], wrongOptions: [...s.wrongOptions] };
     s.busy = true;
     this.emit();
     try {
@@ -4170,7 +4278,7 @@ function historyLabels(records) {
   const groups = /* @__PURE__ */ new Map();
   let number2 = 0;
   return records.map((record) => {
-    if (record.id === "original" && !record.selected) return { id: record.id, label: "\u672A\u4F5C\u7B54" };
+    if (record.id === "original" && record.selected.length === 0) return { id: record.id, label: "\u672A\u4F5C\u7B54" };
     const identity = record.source ? JSON.stringify([record.source.paperId, record.source.paperVersion, record.source.attemptId, record.source.questionId]) : record.id;
     let group = groups.get(identity);
     if (!group) {
@@ -4480,16 +4588,19 @@ async function mountQuestion(plugin, store, callout, q, context) {
   body.append(stem);
   await renderMarkdown(q.stem, stem);
   const rows = [];
-  for (const [index, letter2] of letters.entries()) {
+  for (const [index] of q.options.entries()) {
+    const letter2 = letters[index];
     const row = node("div", "qt-study-option");
     row.dataset.option = letter2;
     const pick = button(letter2, () => {
-      if (store.session(key).redo && !store.session(key).busy) store.pick(key, letter2);
+      if (store.session(key).redo && !store.session(key).busy) store.pick(key, letter2, q.kind);
     });
     pick.classList.add("qt-study-letter");
     pick.setAttribute("aria-label", "\u9009\u62E9 " + letter2);
     const text = node("div", "qt-study-option-body");
     await renderMarkdown(q.options[index], text);
+    const result = node("span", "qt-study-result");
+    text.append(result);
     const uncertain = button("\u4E0D\u786E\u5B9A", () => {
       if (!store.session(key).busy) void store.toggleUncertain(key, q, letter2).catch(report);
     });
@@ -4504,7 +4615,7 @@ async function mountQuestion(plugin, store, callout, q, context) {
     optionControls.append(uncertain, wrong);
     row.append(pick, text, optionControls);
     body.append(row);
-    rows.push({ row, pick, uncertain, wrong });
+    rows.push({ letter: letter2, row, pick, uncertain, wrong, result });
   }
   const bottom = node("div", "qt-study-bottom");
   const status = node("span", "qt-study-status");
@@ -4566,6 +4677,7 @@ async function mountQuestion(plugin, store, callout, q, context) {
     if (materialDisclosure && !materialDisclosureTouched) materialDisclosure.open = store.sharedMaterialDefaultExpanded;
     const session = store.session(key);
     const record = store.current(key, q);
+    const displayKind = session.redo ? q.kind : record.kind;
     const selected = session.redo ? session.selected : record.selected;
     const uncertainOptions = session.redo ? session.uncertainOptions : record.uncertainOptions;
     const wrongOptions = session.redo ? session.wrongOptions : record.wrongOptions;
@@ -4600,18 +4712,23 @@ async function mountQuestion(plugin, store, callout, q, context) {
       history.append(draft);
       history.value = draft.value;
     } else history.value = record.id;
-    rows.forEach(({ row, pick, uncertain, wrong: wrongButton }, i) => {
-      const letter2 = letters[i];
-      const wrong = !session.redo && !!answer && selected === letter2 && letter2 !== answer;
-      const correct = !session.redo && letter2 === answer;
+    rows.forEach(({ letter: letter2, row, pick, uncertain, wrong: wrongButton, result }) => {
+      const chosen = selected.includes(letter2);
+      const expected = answer?.includes(letter2) ?? false;
+      const wrong = !session.redo && answer !== null && chosen && !expected;
+      const correct = !session.redo && answer !== null && expected;
+      const missed = !session.redo && displayKind === "multiple" && answer !== null && expected && !chosen;
       const unsure = uncertainOptions.includes(letter2);
       const markedWrong = wrong || wrongOptions.includes(letter2);
       row.dataset.tone = correct ? "correct" : markedWrong ? unsure ? "uncertain-wrong" : "wrong" : unsure ? "uncertain" : "none";
       row.dataset.uncertain = String(unsure);
-      row.dataset.chosen = String(selected === letter2);
-      row.setAttribute("aria-label", [letter2, unsure ? "\u4E0D\u786E\u5B9A" : "", wrongOptions.includes(letter2) ? "\u9519\u9879" : "", correct ? "\u6B63\u786E\u7B54\u6848" : wrong ? "\u9519\u9009" : "", selected === letter2 ? "\u5DF2\u9009" : ""].filter(Boolean).join("\uFF0C"));
+      row.dataset.chosen = String(chosen);
+      row.dataset.result = missed ? "missed" : wrong ? "wrong" : correct ? "correct" : "none";
+      result.textContent = missed ? "\u6F0F\u9009" : wrong ? "\u9519\u9009" : "";
+      result.dataset.result = row.dataset.result;
+      row.setAttribute("aria-label", [letter2, unsure ? "\u4E0D\u786E\u5B9A" : "", wrongOptions.includes(letter2) ? "\u9519\u9879" : "", missed ? "\u6F0F\u9009" : correct ? "\u6B63\u786E\u7B54\u6848" : wrong ? "\u9519\u9009" : "", chosen ? "\u5DF2\u9009" : ""].filter(Boolean).join("\uFF0C"));
       pick.disabled = !session.redo || session.busy;
-      pick.setAttribute("aria-pressed", String(selected === letter2));
+      pick.setAttribute("aria-pressed", String(chosen));
       uncertain.setAttribute("aria-pressed", String(unsure));
       uncertain.classList.toggle("is-active", unsure);
       uncertain.disabled = session.busy;
@@ -4619,10 +4736,16 @@ async function mountQuestion(plugin, store, callout, q, context) {
       wrongButton.classList.toggle("is-active", wrongOptions.includes(letter2));
       wrongButton.disabled = session.busy;
     });
-    bottom.hidden = !session.redo;
-    status.textContent = selected ? "\u5DF2\u9009 " + selected : "\u672A\u4F5C\u7B54";
-    check.textContent = session.busy ? "\u4FDD\u5B58\u4E2D" : q.answer ? "\u6838\u5BF9\u7B54\u6848" : "\u4FDD\u5B58\u4F5C\u7B54";
-    check.disabled = session.busy || !selected && !session.important && !session.wholeUncertain && !session.unknown && !session.uncertainOptions.length && !session.wrongOptions.length;
+    bottom.hidden = !session.redo && record.id === "original" && record.createdAt === null && record.selected.length === 0;
+    check.hidden = !session.redo;
+    const selectedText = selected.length ? "\u5DF2\u9009 " + selected.join("\u3001") : "\u672A\u4F5C\u7B54";
+    if (!session.redo && answer !== null && displayKind !== "subjective") {
+      const exact = selected.length === answer.length && answer.every((letter2) => selected.includes(letter2));
+      status.textContent = displayKind === "multiple" ? `${selectedText} \xB7 ${exact ? "\u5B8C\u5168\u6B63\u786E" : selected.length ? "\u6709\u9519\u9009\u6216\u6F0F\u9009" : "\u6F0F\u9009\u53C2\u8003\u7B54\u6848"}` : `${selectedText} \xB7 ${exact ? "\u56DE\u7B54\u6B63\u786E" : selected.length ? "\u56DE\u7B54\u9519\u8BEF" : ""}`.replace(/ · $/, "");
+    } else if (!session.redo && displayKind === "subjective" && record.id !== "original") status.textContent = "\u5DF2\u5B8C\u6210\u672C\u6B21\u7EC3\u4E60";
+    else status.textContent = session.redo && q.kind === "subjective" ? "\u5B8C\u6210\u540E\u4FDD\u5B58\u672C\u6B21\u7EC3\u4E60" : selectedText;
+    check.textContent = session.busy ? "\u4FDD\u5B58\u4E2D" : q.kind === "subjective" ? "\u5B8C\u6210\u672C\u6B21" : q.answer ? "\u6838\u5BF9\u7B54\u6848" : "\u4FDD\u5B58\u4F5C\u7B54";
+    check.disabled = session.busy || q.kind !== "subjective" && !selected.length && !session.important && !session.wholeUncertain && !session.unknown && !session.uncertainOptions.length && !session.wrongOptions.length;
     footnoteObserver.disconnect();
     refreshFootnotes();
     const root = callout.closest(".markdown-preview-view, .markdown-embed");
@@ -4820,7 +4943,7 @@ var letter = (value, labels, ids) => {
     value = value[0];
   }
   if (typeof value !== "string") return null;
-  if (letters.includes(value)) return value;
+  if (legacyLetters.includes(value)) return value;
   const index = ids?.indexOf(value) ?? -1;
   const label = index >= 0 ? labels?.[index] : value;
   const match = label?.match(/^\s*([A-D])(?:[.、．)）\s]|$)/);
@@ -4838,7 +4961,7 @@ var parseQuestion = (raw, version) => {
   const wrongRaw = Array.isArray(q.wrongOptions) ? q.wrongOptions : [];
   const wrongOptions = wrongRaw.map((x) => letter(x, labels, ids)).filter((x) => x !== null);
   const type = String(q.type ?? "");
-  const supported = type === "single" && labels.length === 4 && labels.every((v, i) => v.startsWith(letters[i]));
+  const supported = type === "single" && labels.length === 4 && labels.every((v, i) => v.startsWith(legacyLetters[i]));
   const unmappedUncertain = uncertainRaw.some((value) => letter(value, labels, ids) === null);
   const unmappedWrong = wrongRaw.some((value) => letter(value, labels, ids) === null);
   const valid = supported && !unmappedUncertain && !unmappedWrong && (answer !== null || q.answer == null || q.answer === "");
@@ -4852,10 +4975,10 @@ function parseAnswerCardJson(text) {
       const q = obj(raw, "\u9898\u8FF9\u540C\u6B65\u9898\u76EE");
       const allowed = /* @__PURE__ */ new Set(["questionId", "number", "section", "type", "answer", "uncertainOptions", "wrongOptions", "important", "wholeUncertain", "unknown", "supported", "reason"]);
       if (Object.keys(q).some((key) => !allowed.has(key))) throw new Error("\u9898\u8FF9 Skill \u540C\u6B65\u5305\u53EA\u80FD\u5305\u542B\u7B54\u6848\u548C\u6807\u8BB0\uFF0C\u4E0D\u63A5\u53D7\u9898\u76EE\u6B63\u6587\u6216\u7B14\u8BB0\u5B57\u6BB5");
-      const parsed = parseQuestion({ ...q, options: letters }, 2);
-      const flagsValid = Array.isArray(q.uncertainOptions) && q.uncertainOptions.every((v) => letters.includes(v));
-      const wrongFlagsValid = q.wrongOptions === void 0 || Array.isArray(q.wrongOptions) && q.wrongOptions.every((v) => letters.includes(v));
-      const payloadValid = q.supported === true && q.type === "single" && flagsValid && wrongFlagsValid && (q.answer === null || letters.includes(q.answer)) && typeof q.important === "boolean" && typeof q.wholeUncertain === "boolean" && typeof q.unknown === "boolean";
+      const parsed = parseQuestion({ ...q, options: legacyLetters }, 2);
+      const flagsValid = Array.isArray(q.uncertainOptions) && q.uncertainOptions.every((v) => legacyLetters.includes(v));
+      const wrongFlagsValid = q.wrongOptions === void 0 || Array.isArray(q.wrongOptions) && q.wrongOptions.every((v) => legacyLetters.includes(v));
+      const payloadValid = q.supported === true && q.type === "single" && flagsValid && wrongFlagsValid && (q.answer === null || legacyLetters.includes(q.answer)) && typeof q.important === "boolean" && typeof q.wholeUncertain === "boolean" && typeof q.unknown === "boolean";
       parsed.supported = payloadValid && parsed.supported;
       if (!parsed.supported) parsed.reason = String(q.reason || parsed.reason || "\u540C\u6B65\u8BB0\u5F55\u65E0\u6CD5\u660E\u786E\u6620\u5C04\u5230 A\u2013D");
       return parsed;
@@ -4930,7 +5053,7 @@ function parseAnswerCardCsv(text) {
   }
   const questions = rows.slice(1).map((r) => {
     const answer = version === 3 ? jsonCell(col(r, "answer_json")) ?? null : col(r, "answer") || null;
-    const options = version === 3 ? jsonCell(col(r, "options_json")) ?? [] : letters;
+    const options = version === 3 ? jsonCell(col(r, "options_json")) ?? [] : legacyLetters;
     const csvBool = (name2) => {
       const value = col(r, name2);
       if (value === "true") return true;

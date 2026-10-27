@@ -95,7 +95,7 @@ export function historyLabels(records: ReturnType<StudyStore["records"]>) {
   const groups = new Map<string, { number: number; revision: number }>();
   let number = 0;
   return records.map(record => {
-    if (record.id === "original" && !record.selected) return { id: record.id, label: "未作答" };
+    if (record.id === "original" && record.selected.length === 0) return { id: record.id, label: "未作答" };
     const identity = record.source ? JSON.stringify([record.source.paperId, record.source.paperVersion, record.source.attemptId, record.source.questionId]) : record.id;
     let group = groups.get(identity);
     if (!group) { group = { number: ++number, revision: 0 }; groups.set(identity, group); }
@@ -336,19 +336,22 @@ async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLEle
   const history = node("select", "qt-study-history"); history.setAttribute("aria-label", "作答记录"); history.title = "选择一次作答记录";
   const stem = node("div", "qt-study-stem"); body.append(stem);
   await renderMarkdown(q.stem, stem);
-  const rows: { row: HTMLElement; pick: HTMLButtonElement; uncertain: HTMLButtonElement; wrong: HTMLButtonElement }[] = [];
-  for (const [index, letter] of letters.entries()) {
+  const rows: { letter: Letter; row: HTMLElement; pick: HTMLButtonElement; uncertain: HTMLButtonElement; wrong: HTMLButtonElement; result: HTMLElement }[] = [];
+  for (const [index] of q.options.entries()) {
+    const letter = letters[index];
     const row = node("div", "qt-study-option"); row.dataset.option = letter;
-    const pick = button(letter, () => { if (store.session(key).redo && !store.session(key).busy) store.pick(key, letter); });
+    const pick = button(letter, () => { if (store.session(key).redo && !store.session(key).busy) store.pick(key, letter, q.kind); });
     pick.classList.add("qt-study-letter"); pick.setAttribute("aria-label", "选择 " + letter);
     const text = node("div", "qt-study-option-body");
     await renderMarkdown(q.options[index], text);
+    const result = node("span", "qt-study-result");
+    text.append(result);
     const uncertain = button("不确定", () => { if (!store.session(key).busy) void store.toggleUncertain(key, q, letter).catch(report); });
     uncertain.classList.add("qt-study-uncertain"); uncertain.setAttribute("aria-label", letter + " 选项不确定");
     const wrong = button("错项", () => { if (!store.session(key).busy) void store.toggleWrong(key, q, letter).catch(report); });
     wrong.classList.add("qt-study-wrong"); wrong.setAttribute("aria-label", letter + " 选项错项");
     const optionControls = node("div", "qt-study-option-controls"); optionControls.append(uncertain, wrong);
-    row.append(pick, text, optionControls); body.append(row); rows.push({ row, pick, uncertain, wrong });
+    row.append(pick, text, optionControls); body.append(row); rows.push({ letter, row, pick, uncertain, wrong, result });
   }
   const bottom = node("div", "qt-study-bottom");
   const status = node("span", "qt-study-status"); status.setAttribute("role", "status");
@@ -395,6 +398,7 @@ async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLEle
   const update = () => {
     if (materialDisclosure && !materialDisclosureTouched) materialDisclosure.open = store.sharedMaterialDefaultExpanded;
     const session = store.session(key); const record = store.current(key, q);
+    const displayKind = session.redo ? q.kind : record.kind;
     const selected = session.redo ? session.selected : record.selected;
     const uncertainOptions = session.redo ? session.uncertainOptions : record.uncertainOptions;
     const wrongOptions = session.redo ? session.wrongOptions : record.wrongOptions;
@@ -419,23 +423,37 @@ async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLEle
       const completedAttemptCount = labels.reduce((max, item) => Math.max(max, Number(item.label.match(/^第(\d+)次/)?.[1] ?? 0)), 0);
       const draft = node("option", "", `第${completedAttemptCount + 1}次 · 作答中`); draft.value = "__draft"; history.append(draft); history.value = draft.value;
     } else history.value = record.id;
-    rows.forEach(({ row, pick, uncertain, wrong: wrongButton }, i) => {
-      const letter = letters[i]; const wrong = !session.redo && !!answer && selected === letter && letter !== answer;
-      const correct = !session.redo && letter === answer;
+    rows.forEach(({ letter, row, pick, uncertain, wrong: wrongButton, result }) => {
+      const chosen = selected.includes(letter);
+      const expected = answer?.includes(letter) ?? false;
+      const wrong = !session.redo && answer !== null && chosen && !expected;
+      const correct = !session.redo && answer !== null && expected;
+      const missed = !session.redo && displayKind === "multiple" && answer !== null && expected && !chosen;
       const unsure = uncertainOptions.includes(letter);
       const markedWrong = wrong || wrongOptions.includes(letter);
       row.dataset.tone = correct ? "correct" : markedWrong ? (unsure ? "uncertain-wrong" : "wrong") : unsure ? "uncertain" : "none";
       row.dataset.uncertain = String(unsure);
-      row.dataset.chosen = String(selected === letter);
-      row.setAttribute("aria-label", [letter, unsure ? "不确定" : "", wrongOptions.includes(letter) ? "错项" : "", correct ? "正确答案" : wrong ? "错选" : "", selected === letter ? "已选" : ""].filter(Boolean).join("，"));
+      row.dataset.chosen = String(chosen);
+      row.dataset.result = missed ? "missed" : wrong ? "wrong" : correct ? "correct" : "none";
+      result.textContent = missed ? "漏选" : wrong ? "错选" : "";
+      result.dataset.result = row.dataset.result;
+      row.setAttribute("aria-label", [letter, unsure ? "不确定" : "", wrongOptions.includes(letter) ? "错项" : "", missed ? "漏选" : correct ? "正确答案" : wrong ? "错选" : "", chosen ? "已选" : ""].filter(Boolean).join("，"));
       pick.disabled = !session.redo || session.busy;
-      pick.setAttribute("aria-pressed", String(selected === letter)); uncertain.setAttribute("aria-pressed", String(unsure)); uncertain.classList.toggle("is-active", unsure); uncertain.disabled = session.busy;
+      pick.setAttribute("aria-pressed", String(chosen)); uncertain.setAttribute("aria-pressed", String(unsure)); uncertain.classList.toggle("is-active", unsure); uncertain.disabled = session.busy;
       wrongButton.setAttribute("aria-pressed", String(wrongOptions.includes(letter))); wrongButton.classList.toggle("is-active", wrongOptions.includes(letter)); wrongButton.disabled = session.busy;
     });
-    bottom.hidden = !session.redo;
-    status.textContent = selected ? "已选 " + selected : "未作答";
-    check.textContent = session.busy ? "保存中" : q.answer ? "核对答案" : "保存作答";
-    check.disabled = session.busy || (!selected && !session.important && !session.wholeUncertain && !session.unknown && !session.uncertainOptions.length && !session.wrongOptions.length);
+    bottom.hidden = !session.redo && record.id === "original" && record.createdAt === null && record.selected.length === 0;
+    check.hidden = !session.redo;
+    const selectedText = selected.length ? "已选 " + selected.join("、") : "未作答";
+    if (!session.redo && answer !== null && displayKind !== "subjective") {
+      const exact = selected.length === answer.length && answer.every(letter => selected.includes(letter));
+      status.textContent = displayKind === "multiple"
+        ? `${selectedText} · ${exact ? "完全正确" : selected.length ? "有错选或漏选" : "漏选参考答案"}`
+        : `${selectedText} · ${exact ? "回答正确" : selected.length ? "回答错误" : ""}`.replace(/ · $/, "");
+    } else if (!session.redo && displayKind === "subjective" && record.id !== "original") status.textContent = "已完成本次练习";
+    else status.textContent = session.redo && q.kind === "subjective" ? "完成后保存本次练习" : selectedText;
+    check.textContent = session.busy ? "保存中" : q.kind === "subjective" ? "完成本次" : q.answer ? "核对答案" : "保存作答";
+    check.disabled = session.busy || (q.kind !== "subjective" && !selected.length && !session.important && !session.wholeUncertain && !session.unknown && !session.uncertainOptions.length && !session.wrongOptions.length);
     footnoteObserver.disconnect(); refreshFootnotes();
     const root = callout.closest(".markdown-preview-view, .markdown-embed");
     if (session.redo && privateRefs.length && root) footnoteObserver.observe(root, { childList: true, subtree: true });
