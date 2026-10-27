@@ -1,4 +1,4 @@
-import { Letter, letters } from "./study-model";
+import { Letter, legacyLetters as letters } from "./study-model";
 
 export type ImportedQuestion = { questionId: string; number: string; section: string; type: string; answer: Letter | null; uncertainOptions: Letter[]; wrongOptions?: Letter[]; important: boolean; wholeUncertain: boolean; unknown: boolean; note: string; review: boolean; result: string; supported: boolean; reason?: string };
 export type ImportedExercise = { schemaVersion: number; paperId: string; paperVersion: string; attemptId: string; name: string; questions: ImportedQuestion[]; sourceKind: "answer-card" | "question-trail-sync" };
