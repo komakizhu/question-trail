@@ -1,4 +1,5 @@
 import { historyLabels, registerQuestionStudy } from "../src/study-view";
+import { nativeQuestionParts } from "../src/study-render-cache";
 import { StudyStore } from "../src/study-store";
 import { questionKey, readStudyData, studyGroups, studyQuestions } from "../src/study-model";
 import { parseAnswerCardCsv, parseAnswerCardJson } from "../src/study-import";
@@ -6,8 +7,24 @@ import { parseAnswerCardCsv, parseAnswerCardJson } from "../src/study-import";
 /** Real Markdown renderer, isolated DOM and in-memory storage; never writes the user's vault. */
 export async function run(native: any, app: any, css: string) {
   const passed: string[] = [];
+  const cleanup: (() => void)[] = [];
+  // Hidden renderer fixtures exercise controls, not intersection geometry (covered separately).
+  const NativeObserver = window.IntersectionObserver;
+  const waitForCards = async (root: HTMLElement, count: number) => {
+    for (let i = 0; i < 100 && root.querySelectorAll(".qt-study-question").length < count; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  };
   const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
   const wait = () => new Promise(resolve => setTimeout(resolve, 25));
+  const markup = document.createElement("div");
+  markup.innerHTML = '<p>题干 <span class="math">x²</span></p><p>A. <strong>甲</strong><sup class="footnote-ref"><a href="#fn1">1</a></sup><br>B. <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><br>C. 丙<br>D. 丁</p>';
+  const beforeMarkup = markup.innerHTML;
+  const parts = nativeQuestionParts(markup, 4)!;
+  assert(parts?.length === 5 && parts[0].querySelector(".math") && parts[1].querySelector("strong")?.textContent === "甲" && parts[1].querySelector("a")?.getAttribute("href") === "#fn1" && parts[2].querySelector("img"), "native fragments preserve math, rich text, images and footnote targets");
+  assert(markup.innerHTML === beforeMarkup && !parts[1].textContent?.includes("A."), "native splitting preserves original nodes and removes option labels");
+  markup.innerHTML = '<p>题干</p><p>A. 甲<br>C. 丙</p>';
+  assert(nativeQuestionParts(markup, 2) === null, "ambiguous native option boundaries use fallback");
+  passed.push("复用题干选项并保留公式、图片、脚注，歧义排版保留回退");
+
   const source = ["#### 第 103 题", "", "> [!exam-question] 第 103 题", "> 咖啡销量没有增加，以下哪项最能削弱？", ">", "> A. **个别**门店不健康", "> B. 单价过高", "> C. 今年企业转向其他品类", "> D. 文化不成熟", "", "^q103", "", "标签：#考点/削弱论证 #状态/不确定", "关联：[[示例笔记]]", "", "> [!success]- 答案与解析", "> 参考答案：B", "> 解析：价格过高。", "", "> [!note]- 我的笔记", "> 我的答案：C", "> 需要复盘。", "", "#### 第 104 题", "", "> [!exam-question] 第 104 题", "> 第二题", "> A. 甲", "> B. 乙", "> C. 丙", "> D. 丁", "", "^q104", "", "标签：", "关联：", "", "> [!success]- 答案与解析", "> 参考答案：A", ""].join("\n");
   const typedSource = [
     "> [!exam-material] 共用材料", "> 这段材料应在整组重做时保留。", "", "^mtyped", "",
@@ -93,7 +110,7 @@ export async function run(native: any, app: any, css: string) {
     if (property === "vault") return isolatedVault;
     const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
   } });
-  const plugin: any = { app: isolatedApp, loadData: async () => structuredClone(saved), saveData: async (v: any) => { if (failSave) throw new Error("disk failure"); saved = structuredClone(v); }, registerEvent() {}, registerEditorExtension() {}, registerMarkdownPostProcessor(fn: any) { processors.push(fn); } };
+  const plugin: any = { app: isolatedApp, loadData: async () => structuredClone(saved), saveData: async (v: any) => { if (failSave) throw new Error("disk failure"); saved = structuredClone(v); }, register(callback: () => void) { cleanup.push(callback); }, registerEvent() {}, registerEditorExtension() {}, registerMarkdownPostProcessor(fn: any) { processors.push(fn); } };
   const processors: any[] = [];
   const children: any[] = [];
   const host = document.createElement("div"); host.dataset.questionTrailStudyTest = "true";
@@ -102,6 +119,21 @@ export async function run(native: any, app: any, css: string) {
   const style = document.createElement("style"); style.textContent = css; host.append(style); document.body.append(host);
   const ranges = [[2,10],[12,13],[15,17],[19,21],[25,32],[34,35],[37,38]];
   const blocks: HTMLElement[] = [];
+  window.IntersectionObserver = class extends NativeObserver {
+    private testCallback: IntersectionObserverCallback;
+    private bounds = new Map<Element, () => DOMRect>();
+    constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) { super(callback, options); this.testCallback = callback; }
+    observe(target: Element) {
+      if (target.closest("[data-question-trail-study-test]")) {
+        this.bounds.set(target, target.getBoundingClientRect);
+        target.getBoundingClientRect = () => { const parent = target.closest(".markdown-preview-view")!.getBoundingClientRect(); return new DOMRect(parent.x, parent.y + 10, 600, 50); };
+        queueMicrotask(() => this.testCallback([{ target, isIntersecting: true } as IntersectionObserverEntry], this));
+      }
+      else super.observe(target);
+    }
+    unobserve(target: Element) { const original = this.bounds.get(target); if (original) { target.getBoundingClientRect = original; this.bounds.delete(target); } super.unobserve(target); }
+    disconnect() { for (const target of this.bounds.keys()) this.unobserve(target); super.disconnect(); }
+  };
   try {
     await registerQuestionStudy(plugin);
     for (const [start, end] of ranges) {
@@ -124,6 +156,7 @@ export async function run(native: any, app: any, css: string) {
       if (!title.querySelector(".exam-question-actions")) { const actions = document.createElement("span"); actions.className = "exam-question-actions"; title.append(actions); }
     });
     for (const processor of processors) await processor(typedHost, { sourcePath: typedFilePath, getSectionInfo: () => ({text:typedSource,lineStart:0,lineEnd:typedSource.split("\n").length-1}), addChild: (c: any) => typedComponent.addChild(c) });
+    await waitForCards(typedHost, 4);
     const typedCards = Array.from(typedHost.querySelectorAll<HTMLElement>(".callout.qt-study-question"));
     assert(typedCards.length === 4, "all explicit question types mount in the reading view");
     const typedLines = typedSource.split("\n");
@@ -142,9 +175,9 @@ export async function run(native: any, app: any, css: string) {
     const groupRedo = typedHost.querySelector<HTMLButtonElement>(".qt-study-group-redo")!;
     assert(groupRedo && multiCard.querySelector(".qt-study-question-material")?.textContent?.includes("这段材料应在整组重做时保留"), "material groups expose controls and each question retains shared material");
     groupRedo.click(); await wait();
-    assert(typedCards.slice(0,3).every(item => Array.from(item.querySelectorAll(".qt-study-extra")).some(extra => extra.classList.contains("qt-study-concealed"))) && multiCard.querySelector(".qt-study-question-material") && groupRedo.textContent === "退出整组重做", "group redo hides personal clues while keeping shared material visible");
+    assert(detailCards.every(extra => extra.classList.contains("qt-study-concealed")) && multiCard.querySelector(".qt-study-question-material") && groupRedo.textContent === "退出整组重做", "group redo hides personal clues while keeping shared material visible");
     groupRedo.click(); await wait();
-    assert(typedCards.slice(0,3).every((item,index) => saved.questionTrailV3.questions[typedKey(["qm201","qj202","qs203"][index])].length === 1), "entering and leaving group redo does not add attempts");
+    assert(typedCards.slice(0,3).every((item,index) => (saved.questionTrailV3.questions[typedKey(["qm201","qj202","qs203"][index])]?.length ?? 0) === 0), "entering and leaving group redo does not add attempts");
     passed.push("混合题型题组可整组重做，隐藏个人提示并保留材料");
     cardButton(multiCard, "重做").click();
     multiRows("A").querySelector<HTMLButtonElement>(".qt-study-letter")!.click();
@@ -171,7 +204,7 @@ export async function run(native: any, app: any, css: string) {
     assert(subjectiveCard.querySelectorAll(".qt-study-option").length === 0 && subjectiveCard.querySelector(".qt-study-stem")?.textContent?.includes("说明原因"), "subjective question shows its body without option controls");
     cardButton(subjectiveCard, "重做").click();
     cardButton(subjectiveCard, "退出重做").click();
-    assert(saved.questionTrailV3.questions[typedKey("qs203")].length === 1, "leaving subjective redo does not add an attempt");
+    assert((saved.questionTrailV3.questions[typedKey("qs203")]?.length ?? 0) === 0, "leaving subjective redo does not add an attempt");
     cardButton(subjectiveCard, "重做").click();
     const finishSubjective = cardButton(subjectiveCard, "完成本次");
     assert(!finishSubjective.disabled, "an empty subjective attempt can be completed");
@@ -295,11 +328,12 @@ export async function run(native: any, app: any, css: string) {
     await native.Renderer.render(app, footnoteSource, footnoteHost, filePath, component);
     if (!footnoteHost.querySelector(".exam-question-actions")) { const actions=document.createElement("span"); actions.className="exam-question-actions"; footnoteHost.querySelector(".callout-title")!.append(actions); }
     for (const processor of processors) await processor(footnoteHost, { sourcePath: "footnote.md", getSectionInfo: () => ({ text: footnoteSource, lineStart:0, lineEnd:footnoteSource.split("\n").length-1 }), addChild:(c:any)=>component.addChild(c) });
+    await waitForCards(footnoteHost, 1);
     const ref=footnoteHost.querySelector<HTMLAnchorElement>(".qt-study-option sup a[data-footref]")!;
     assert(ref && footnoteHost.querySelector('[id="'+ref.getAttribute("href")!.slice(1)+'"]'), "native footnote targets preserved");
     Array.from(footnoteHost.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="重做")!.click();
     assert(ref.parentElement!.classList.contains("qt-study-concealed") && footnoteHost.querySelector(".footnotes li")!.classList.contains("qt-study-concealed"), "hide personal footnotes during redo");
     passed.push("保留原生脚注跳转，重做时隐藏个人脚注提示");
     return { passed: passed.length, results: passed };
-  } finally { children.forEach(c => c.unload()); host.remove(); }
+  } finally { cleanup.forEach(fn => fn()); children.forEach(c => c.unload()); host.remove(); window.IntersectionObserver = NativeObserver; }
 }

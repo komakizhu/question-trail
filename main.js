@@ -3762,7 +3762,7 @@ function studyQuestions(source) {
     }];
   });
 }
-function studyGroups(source) {
+function studyGroups(source, questions = studyQuestions(source)) {
   const lines = source.split("\n");
   const callouts = findCallouts(source);
   const allBlockIds = /* @__PURE__ */ new Map();
@@ -3782,7 +3782,7 @@ function studyGroups(source) {
     materials.set(blockId, entries);
   }
   const parsed = findExamQuestions(source);
-  const supported = new Map(studyQuestions(source).map((question) => [question.headerLine, question]));
+  const supported = new Map(questions.map((question) => [question.headerLine, question]));
   const sequence = parsed.map((question) => {
     const valid = supported.get(question.headerLine);
     const ids = question.materialIds;
@@ -4176,10 +4176,207 @@ async function getStudyStore(plugin) {
   }
 }
 
+// src/study-render-cache.ts
+var StudyRenderCache = class {
+  constructor() {
+    this.entries = /* @__PURE__ */ new Map();
+  }
+  get(path, source) {
+    let entry = this.entries.get(path);
+    if (!entry || entry.source !== source) entry = createEntry(source);
+    this.entries.delete(path);
+    this.entries.set(path, entry);
+    if (this.entries.size > 8) this.entries.delete(this.entries.keys().next().value);
+    return entry;
+  }
+  clear() {
+    this.entries.clear();
+  }
+};
+function createEntry(source) {
+  const questions = studyQuestions(source);
+  const lines = source.split("\n");
+  const counts = /* @__PURE__ */ new Map();
+  for (const line of lines) {
+    const id = line.trim().match(/^\^([A-Za-z0-9_-]+)$/)?.[1];
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  const materials = /* @__PURE__ */ new Map();
+  const groups = studyGroups(source, questions);
+  const byTitle = /* @__PURE__ */ new Map();
+  const groupAtLine = /* @__PURE__ */ new Map();
+  const extraAtLine = /* @__PURE__ */ new Map();
+  const materialHeaders = [...groups].sort((a, b) => a.materialHeaderLine - b.materialHeaderLine);
+  for (const question of questions) {
+    const sameTitle = byTitle.get(question.title) ?? [];
+    sameTitle.push(question);
+    byTitle.set(question.title, sameTitle);
+    for (const extra of question.extras) {
+      for (let line = extra.start; line < extra.end; line++) extraAtLine.set(line, { question, extra });
+    }
+  }
+  for (const group of groups) {
+    for (let line = group.firstQuestionLine; line <= group.lastQuestionLine; line++) groupAtLine.set(line, group);
+  }
+  return {
+    source,
+    lines,
+    questions,
+    groups,
+    questionAt(title, start, end) {
+      const candidates = (byTitle.get(title) ?? []).filter((question) => question.headerLine >= start && question.headerLine <= end);
+      return candidates.length === 1 ? candidates[0] : null;
+    },
+    materialGroupAt(start, end) {
+      let low = 0, high = materialHeaders.length;
+      while (low < high) {
+        const middle = low + high >>> 1;
+        if (materialHeaders[middle].materialHeaderLine < start) low = middle + 1;
+        else high = middle;
+      }
+      const group = materialHeaders[low];
+      return group && group.materialHeaderLine <= end ? group : null;
+    },
+    groupAt(start, end) {
+      const group = groupAtLine.get(start);
+      return group && end <= group.lastQuestionLine ? group : null;
+    },
+    extraAt(start, end) {
+      const owned = extraAtLine.get(start);
+      return owned && end < owned.extra.end ? owned : null;
+    },
+    material(id) {
+      if (!materials.has(id)) materials.set(id, counts.get(id) === 1 ? extractBlockById(source, id) : null);
+      return materials.get(id) ?? null;
+    }
+  };
+}
+function nativeQuestionParts(content2, optionCount) {
+  if (content2.querySelector("canvas, iframe, video, audio")) return null;
+  if (!optionCount) {
+    const range = document.createRange();
+    range.selectNodeContents(content2);
+    return [range.cloneContents()];
+  }
+  const markers = [];
+  let lineStart = true;
+  const visit = (node2) => {
+    if (node2.nodeType === Node.TEXT_NODE) {
+      const text = node2;
+      const re = /(^|\n)[ \t]{0,3}([A-Z])[.．、)）][ \t]*/g;
+      for (const match of text.data.matchAll(re)) {
+        if (match.index === 0 && !lineStart) continue;
+        markers.push({ node: text, start: match.index + match[1].length, end: match.index + match[0].length, letter: match[2] });
+      }
+      if (text.data.trim()) lineStart = /\n[ \t]*$/.test(text.data);
+      return;
+    }
+    if (!(node2 instanceof HTMLElement)) return;
+    if (node2.matches("pre, code, table, .math, .internal-embed, svg")) {
+      lineStart = false;
+      return;
+    }
+    if (node2.tagName === "BR") {
+      lineStart = true;
+      return;
+    }
+    const block = /^(P|DIV|LI|BLOCKQUOTE|H[1-6])$/.test(node2.tagName);
+    if (block) lineStart = true;
+    for (const child of Array.from(node2.childNodes)) visit(child);
+    if (block) lineStart = true;
+  };
+  for (const child of Array.from(content2.childNodes)) visit(child);
+  if (markers.length !== optionCount || markers.some((m, i) => m.letter !== String.fromCharCode(65 + i))) return null;
+  const parts = [];
+  for (let i = 0; i <= markers.length; i++) {
+    const range = document.createRange();
+    range.selectNodeContents(content2);
+    if (i) range.setStart(markers[i - 1].node, markers[i - 1].end);
+    if (i < markers.length) range.setEnd(markers[i].node, markers[i].start);
+    const fragment = range.cloneContents();
+    while (fragment.lastChild?.nodeType === Node.TEXT_NODE && !fragment.lastChild.textContent?.trim()) fragment.lastChild.remove();
+    const last = fragment.lastElementChild;
+    if (last?.lastElementChild?.tagName === "BR") last.lastElementChild.remove();
+    parts.push(fragment);
+  }
+  return parts;
+}
+var NearbyQuestions = class {
+  constructor(whenReady = () => true) {
+    this.whenReady = whenReady;
+    this.pending = /* @__PURE__ */ new Map();
+    this.ready = /* @__PURE__ */ new Set();
+    this.frame = 0;
+    this.disposed = false;
+    this.observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) this.ready.add(entry.target);
+        else this.ready.delete(entry.target);
+      }
+      this.schedule();
+    }, { rootMargin: "350px 0px" });
+  }
+  add(element, mount) {
+    if (this.pending.has(element)) return () => {
+    };
+    this.pending.set(element, mount);
+    this.observer.observe(element);
+    return () => {
+      this.observer.unobserve(element);
+      this.pending.delete(element);
+      this.ready.delete(element);
+    };
+  }
+  schedule() {
+    if (!this.disposed && !this.frame && this.ready.size) this.frame = requestAnimationFrame(() => this.drain());
+  }
+  drain() {
+    this.frame = 0;
+    let count = 0;
+    for (const element of this.ready) {
+      this.ready.delete(element);
+      const mount = this.pending.get(element);
+      if (!mount || !element.isConnected) continue;
+      if (!this.whenReady(element, () => {
+        if (!this.disposed && this.pending.has(element)) {
+          this.ready.add(element);
+          this.schedule();
+        }
+      })) continue;
+      const viewport = element.closest(".markdown-preview-view");
+      const bounds = element.getBoundingClientRect();
+      const area = viewport?.getBoundingClientRect();
+      if (!bounds.height || area && (bounds.bottom < area.top - 350 || bounds.top > area.bottom + 350)) continue;
+      this.pending.delete(element);
+      this.observer.unobserve(element);
+      void mount().catch((error) => console.error("\u9898\u8FF9\uFF1A\u9644\u8FD1\u9898\u76EE\u521D\u59CB\u5316\u5931\u8D25", error));
+      if (++count === 2) break;
+    }
+    this.schedule();
+  }
+  destroy() {
+    this.disposed = true;
+    this.observer.disconnect();
+    if (this.frame) cancelAnimationFrame(this.frame);
+    this.pending.clear();
+    this.ready.clear();
+  }
+};
+
 // src/study-view.ts
+function activeLivePreview(view, plugin) {
+  const source = view.dom.closest(".markdown-source-view.is-live-preview");
+  if (!source || source.style.display === "none" || source.hidden || source.closest(".mod-hidden")) return false;
+  return plugin.app.workspace.getLeavesOfType("markdown").some((leaf) => {
+    const markdown = leaf.view;
+    return markdown.getMode?.() === "source" && markdown.containerEl.contains(view.dom);
+  });
+}
 var StudyExtraCalloutEditor = class {
-  constructor(view) {
+  constructor(view, cache, plugin) {
     this.view = view;
+    this.cache = cache;
+    this.plugin = plugin;
     this.source = "";
     this.detailTypes = /* @__PURE__ */ new Map();
     this.refresh();
@@ -4188,12 +4385,14 @@ var StudyExtraCalloutEditor = class {
     this.refresh();
   }
   refresh() {
+    if (!activeLivePreview(this.view, this.plugin)) return;
     const source = this.view.state.doc.toString();
     if (source !== this.source) {
       this.source = source;
       this.detailTypes = /* @__PURE__ */ new Map();
-      const lines = source.split("\n");
-      for (const question of studyQuestions(source)) {
+      const path = this.plugin.app.workspace.getActiveFile()?.path ?? "";
+      const { lines, questions } = this.cache.get(path, source);
+      for (const question of questions) {
         for (const extra of question.extras) {
           if (extra.kind !== "detail") continue;
           const type = lines[extra.start]?.match(/^>\s*\[!(success|note)\]/)?.[1];
@@ -4414,10 +4613,11 @@ function ensureGroupControls(plugin, callout, group, path, questions, store, reg
   }
 }
 var StudyGroupEditor = class {
-  constructor(view, plugin, store) {
+  constructor(view, plugin, store, cache) {
     this.view = view;
     this.plugin = plugin;
     this.store = store;
+    this.cache = cache;
     this.decorations = import_view3.Decoration.none;
     this.source = "";
     this.groups = [];
@@ -4425,6 +4625,7 @@ var StudyGroupEditor = class {
     this.applied = /* @__PURE__ */ new Map();
     this.pendingGroupControls = /* @__PURE__ */ new WeakSet();
     this.unsubscribe = null;
+    this.livePreview = false;
     this.unsubscribe = store.subscribe(() => this.refresh());
     this.refresh();
   }
@@ -4433,25 +4634,26 @@ var StudyGroupEditor = class {
   }
   update(update) {
     if (update.docChanged) this.applied = new Map([...this.applied].map(([key, range]) => [key, { from: update.changes.mapPos(range.from), to: update.changes.mapPos(range.to) }]));
-    if (update.docChanged || update.viewportChanged) this.refresh();
+    if (update.docChanged || update.viewportChanged || this.livePreview !== activeLivePreview(this.view, this.plugin)) this.refresh();
   }
   refresh() {
+    const file = this.plugin.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView)?.file ?? this.plugin.app.workspace.getActiveFile();
+    const path = file?.path ?? "";
+    this.livePreview = activeLivePreview(this.view, this.plugin);
+    if (!this.livePreview) {
+      this.decorations = import_view3.Decoration.none;
+      if (this.applied.size) this.syncFoldRanges([], path);
+      return;
+    }
     const source = this.view.state.doc.toString();
     if (source !== this.source) {
       this.source = source;
-      this.groups = studyGroups(source);
-      this.questions = studyQuestions(source);
+      const entry = this.cache.get(path, source);
+      this.questions = entry.questions;
+      this.groups = entry.groups;
     }
     const groups = this.groups;
     const questions = this.questions;
-    const file = this.plugin.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView)?.file ?? this.plugin.app.workspace.getActiveFile();
-    const path = file?.path ?? "";
-    const livePreview = !!this.view.dom.closest(".markdown-source-view.is-live-preview");
-    if (!livePreview) {
-      this.decorations = import_view3.Decoration.none;
-      this.syncFoldRanges([], path);
-      return;
-    }
     const lineDecorations = [];
     for (const group of groups) {
       if (this.store.folded(path, group.materialId, "group")) continue;
@@ -4521,11 +4723,12 @@ var StudyGroupEditor = class {
     this.unsubscribe = null;
   }
 };
-async function mountQuestion(plugin, store, callout, q, context) {
+async function mountQuestion(plugin, store, callout, q, context, entry) {
   if (callout.classList.contains("qt-study-question")) return;
   const content2 = callout.querySelector(":scope > .callout-content");
   const actions = callout.querySelector(":scope > .callout-title .exam-question-actions");
   if (!content2 || !actions) return;
+  const nativeParts = nativeQuestionParts(content2, q.options.length);
   const key = questionKey(context.sourcePath, q.blockId);
   const child = new import_obsidian2.MarkdownRenderChild(callout);
   context.addChild(child);
@@ -4548,14 +4751,7 @@ async function mountQuestion(plugin, store, callout, q, context) {
     disposed = true;
   });
   const body = node("div", "qt-study-body");
-  const sourceFile = plugin.app.vault.getAbstractFileByPath(context.sourcePath);
-  const source = sourceFile ? await plugin.app.vault.cachedRead(sourceFile) : "";
-  const blockCounts = /* @__PURE__ */ new Map();
-  source.split("\n").forEach((line) => {
-    const id = line.trim().match(/^\^([A-Za-z0-9_-]+)$/)?.[1];
-    if (id) blockCounts.set(id, (blockCounts.get(id) ?? 0) + 1);
-  });
-  const material = q.materialIds.length === 1 && blockCounts.get(q.materialIds[0]) === 1 ? extractBlockById(source, q.materialIds[0]) : null;
+  const material = q.materialIds.length === 1 ? entry.material(q.materialIds[0]) : null;
   const materialDisclosure = material ? node("details", "qt-study-question-material") : null;
   let materialDisclosureTouched = false;
   if (material && materialDisclosure) {
@@ -4586,7 +4782,8 @@ async function mountQuestion(plugin, store, callout, q, context) {
   history.title = "\u9009\u62E9\u4E00\u6B21\u4F5C\u7B54\u8BB0\u5F55";
   const stem = node("div", "qt-study-stem");
   body.append(stem);
-  await renderMarkdown(q.stem, stem);
+  if (nativeParts) stem.append(nativeParts[0]);
+  else await renderMarkdown(q.stem, stem);
   const rows = [];
   for (const [index] of q.options.entries()) {
     const letter2 = letters[index];
@@ -4598,7 +4795,8 @@ async function mountQuestion(plugin, store, callout, q, context) {
     pick.classList.add("qt-study-letter");
     pick.setAttribute("aria-label", "\u9009\u62E9 " + letter2);
     const text = node("div", "qt-study-option-body");
-    await renderMarkdown(q.options[index], text);
+    if (nativeParts) text.append(nativeParts[index + 1]);
+    else await renderMarkdown(q.options[index], text);
     const result = node("span", "qt-study-result");
     text.append(result);
     const uncertain = button("\u4E0D\u786E\u5B9A", () => {
@@ -4776,45 +4974,55 @@ function spaceTags(element) {
     } else tag.after(document.createTextNode(" "));
   });
 }
-async function registerQuestionStudy(plugin) {
+async function registerQuestionStudy(plugin, addActions) {
   let store;
   try {
     store = await getStudyStore(plugin);
   } catch (error) {
     console.error(error);
     new import_obsidian2.Notice("\u9898\u8FF9\uFF1A\u4F5C\u7B54\u8BB0\u5F55\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u5DF2\u4FDD\u7559\u539F\u6570\u636E\uFF1B\u7B54\u9898\u529F\u80FD\u6682\u672A\u542F\u7528");
-    return;
+    return false;
   }
+  const cache = new StudyRenderCache();
   plugin.registerEditorExtension(codeFolding());
-  plugin.registerEditorExtension(import_view3.ViewPlugin.fromClass(StudyExtraCalloutEditor));
+  class BoundStudyExtraCalloutEditor extends StudyExtraCalloutEditor {
+    constructor(view) {
+      super(view, cache, plugin);
+    }
+  }
+  plugin.registerEditorExtension(import_view3.ViewPlugin.fromClass(BoundStudyExtraCalloutEditor));
   class BoundStudyGroupEditor extends StudyGroupEditor {
     constructor(view) {
-      super(view, plugin, store);
+      super(view, plugin, store, cache);
     }
   }
   plugin.registerEditorExtension(import_view3.ViewPlugin.fromClass(BoundStudyGroupEditor, { decorations: (value) => value.lineDecorations }));
-  let cachedSource = "";
-  let cachedQuestions = [];
-  let cachedGroups = [];
+  const nearby = new NearbyQuestions((element, resume) => {
+    const renderer = plugin.app.workspace.getLeavesOfType("markdown").map((leaf) => leaf.view?.previewMode?.renderer).find((renderer2) => renderer2?.sections.some((section) => section.el === element || section.el.contains(element)));
+    if (renderer?.rendered) {
+      renderer.onRendered(resume);
+      return false;
+    }
+    return true;
+  });
+  plugin.register(() => {
+    nearby.destroy();
+    cache.clear();
+  });
   plugin.registerEvent(plugin.app.vault.on("rename", (file, oldPath) => {
     void store.rename(oldPath, file.path).catch(report);
   }));
-  plugin.registerMarkdownPostProcessor(async (element, context) => {
+  plugin.registerMarkdownPostProcessor((element, context) => {
     if (element.closest(".markdown-source-view, .qt-study-body, .qt-study-note-rendering")) return;
     const section = context.getSectionInfo(element);
     if (!section) return;
-    if (section.text !== cachedSource) {
-      cachedSource = section.text;
-      cachedQuestions = studyQuestions(section.text);
-      cachedGroups = studyGroups(section.text);
-    }
-    const questions = cachedQuestions;
-    const groups = cachedGroups;
+    const entry = cache.get(context.sourcePath, section.text);
+    const { questions } = entry;
     const callouts = [...element.matches(".callout[data-callout='exam-question']") ? [element] : [], ...Array.from(element.querySelectorAll(".callout[data-callout='exam-question']"))];
     const materialCallouts = [...element.matches(".callout[data-callout='exam-material']") ? [element] : [], ...Array.from(element.querySelectorAll(".callout[data-callout='exam-material']"))];
     for (const callout of materialCallouts) {
       const info = context.getSectionInfo(callout);
-      const group = groups.find((item) => info && item.materialHeaderLine >= info.lineStart && item.materialHeaderLine <= info.lineEnd);
+      const group = info && entry.materialGroupAt(info.lineStart, info.lineEnd);
       if (!group || callout.querySelector(":scope > .callout-title .qt-study-group-controls")) continue;
       const child2 = new import_obsidian2.MarkdownRenderChild(callout);
       context.addChild(child2);
@@ -4823,10 +5031,22 @@ async function registerQuestionStudy(plugin) {
     for (const callout of callouts) {
       const info = context.getSectionInfo(callout);
       const title = callout.querySelector(":scope > .callout-title > .callout-title-inner")?.textContent?.trim();
-      const candidates = questions.filter((q) => info && q.headerLine >= info.lineStart && q.headerLine <= info.lineEnd && q.title === title);
-      if (candidates.length === 1) await mountQuestion(plugin, store, callout, candidates[0], context);
+      const question = info && title ? entry.questionAt(title, info.lineStart, info.lineEnd) : null;
+      if (question || addActions) {
+        const lifecycle = new import_obsidian2.MarkdownRenderChild(callout);
+        context.addChild(lifecycle);
+        let disposed = false;
+        lifecycle.register(() => {
+          disposed = true;
+        });
+        lifecycle.register(nearby.add(callout, async () => {
+          if (disposed) return;
+          addActions?.(callout, context.sourcePath, info?.lineStart);
+          if (question) await mountQuestion(plugin, store, callout, question, context, entry);
+        }));
+      }
     }
-    const grouped = groups.find((group) => section.lineStart >= group.firstQuestionLine && section.lineEnd <= group.lastQuestionLine);
+    const grouped = entry.groupAt(section.lineStart, section.lineEnd);
     if (grouped) {
       const child2 = new import_obsidian2.MarkdownRenderChild(element);
       context.addChild(child2);
@@ -4858,62 +5078,73 @@ async function registerQuestionStudy(plugin) {
         inner.replaceWith(...Array.from(inner.childNodes));
       });
     }
-    const owner = questions.find((q) => q.extras.some((extra) => section.lineStart >= extra.start && section.lineEnd < extra.end));
+    const owned = entry.extraAt(section.lineStart, section.lineEnd);
+    const owner = owned?.question;
     if (!owner) return;
     const child = new import_obsidian2.MarkdownRenderChild(element);
     context.addChild(child);
     const key = questionKey(context.sourcePath, owner.blockId);
-    const metadata = owner.extras.some((extra) => extra.kind === "metadata" && section.lineStart >= extra.start && section.lineEnd < extra.end);
-    const raw = section.text.split("\n").slice(section.lineStart, section.lineEnd + 1).join("\n");
-    if (metadata && /^标签[：:]\S/m.test(raw)) {
-      const original = Array.from(element.childNodes);
-      const normalized = node("div");
-      await import_obsidian2.MarkdownRenderer.render(plugin.app, raw.replace(/^(标签[：:])(?=\S)/gm, "$1 "), normalized, context.sourcePath, child);
-      element.replaceChildren(...Array.from(normalized.childNodes));
-      child.register(() => {
-        element.replaceChildren(...original);
-      });
-    }
+    const metadata = owned.extra.kind === "metadata";
+    const raw = entry.lines.slice(section.lineStart, section.lineEnd + 1).join("\n");
     const normalizedNote = normalizeIndentedNoteCallout(raw);
     const detailContent = element.querySelector(":scope > .callout-content");
-    if (normalizedNote && detailContent) {
-      const references = /* @__PURE__ */ new Map();
-      detailContent.querySelectorAll("sup.footnote-ref").forEach((ref) => {
-        const id = ref.querySelector("a")?.getAttribute("data-footref");
-        if (id) {
-          const list = references.get(id) ?? [];
-          list.push(ref);
-          references.set(id, list);
-        }
-      });
-      const definitions = [...references.keys()].map((id) => `[^${id}]: .`).join("\n");
-      const normalized = node("div", "qt-study-note-rendering");
-      await import_obsidian2.MarkdownRenderer.render(plugin.app, normalizedNote + (definitions ? "\n\n" + definitions : ""), normalized, context.sourcePath, child);
-      normalized.querySelectorAll(".footnotes").forEach((el) => el.remove());
-      normalized.querySelectorAll("sup.footnote-ref").forEach((ref) => {
-        const id = ref.querySelector("a")?.getAttribute("data-footref");
-        const original2 = id && references.get(id)?.shift();
-        if (original2) ref.replaceWith(original2.cloneNode(true));
-      });
-      const original = Array.from(detailContent.childNodes);
-      detailContent.replaceChildren(...Array.from(normalized.childNodes));
+    const finish = () => {
+      element.classList.add("qt-study-extra");
+      spaceTags(element);
+      const lastExtra = owner.extras.at(-1);
+      if (lastExtra && section.lineStart >= lastExtra.start && section.lineEnd < lastExtra.end) element.classList.add("qt-study-question-end");
+      const update = () => {
+        element.classList.toggle("qt-study-concealed", store.session(key).redo);
+      };
+      child.register(store.subscribe(update));
+      update();
       child.register(() => {
-        detailContent.replaceChildren(...original);
+        element.classList.remove("qt-study-extra", "qt-study-concealed", "qt-study-question-end");
       });
-    }
-    element.classList.add("qt-study-extra");
-    spaceTags(element);
-    const lastExtra = owner.extras.at(-1);
-    if (lastExtra && section.lineStart >= lastExtra.start && section.lineEnd < lastExtra.end) element.classList.add("qt-study-question-end");
-    const update = () => {
-      element.classList.toggle("qt-study-concealed", store.session(key).redo);
     };
-    child.register(store.subscribe(update));
-    update();
-    child.register(() => {
-      element.classList.remove("qt-study-extra", "qt-study-concealed", "qt-study-question-end");
-    });
+    if (!(metadata && /^标签[：:]\S/m.test(raw)) && !(normalizedNote && detailContent)) {
+      finish();
+      return;
+    }
+    return (async () => {
+      if (metadata && /^标签[：:]\S/m.test(raw)) {
+        const original = Array.from(element.childNodes);
+        const normalized = node("div");
+        await import_obsidian2.MarkdownRenderer.render(plugin.app, raw.replace(/^(标签[：:])(?=\S)/gm, "$1 "), normalized, context.sourcePath, child);
+        element.replaceChildren(...Array.from(normalized.childNodes));
+        child.register(() => {
+          element.replaceChildren(...original);
+        });
+      }
+      if (normalizedNote && detailContent) {
+        const references = /* @__PURE__ */ new Map();
+        detailContent.querySelectorAll("sup.footnote-ref").forEach((ref) => {
+          const id = ref.querySelector("a")?.getAttribute("data-footref");
+          if (id) {
+            const list = references.get(id) ?? [];
+            list.push(ref);
+            references.set(id, list);
+          }
+        });
+        const definitions = [...references.keys()].map((id) => `[^${id}]: .`).join("\n");
+        const normalized = node("div", "qt-study-note-rendering");
+        await import_obsidian2.MarkdownRenderer.render(plugin.app, normalizedNote + (definitions ? "\n\n" + definitions : ""), normalized, context.sourcePath, child);
+        normalized.querySelectorAll(".footnotes").forEach((el) => el.remove());
+        normalized.querySelectorAll("sup.footnote-ref").forEach((ref) => {
+          const id = ref.querySelector("a")?.getAttribute("data-footref");
+          const original2 = id && references.get(id)?.shift();
+          if (original2) ref.replaceWith(original2.cloneNode(true));
+        });
+        const original = Array.from(detailContent.childNodes);
+        detailContent.replaceChildren(...Array.from(normalized.childNodes));
+        child.register(() => {
+          detailContent.replaceChildren(...original);
+        });
+      }
+      finish();
+    })();
   }, 20);
+  return true;
 }
 
 // src/study-import.ts
@@ -5118,7 +5349,9 @@ var ExamNotesPlugin = class extends import_obsidian3.Plugin {
       void this.importAnswerCard(view.file.path);
     } });
     this.addCommand({ id: "process-question-trail-sync", name: "\u5904\u7406\u9898\u8FF9 Skill \u540C\u6B65", callback: () => void this.processQuestionTrailInbox() });
+    const studyRegistered = await registerQuestionStudy(this, (callout, path, line) => this.addRenderedActions(callout, path, line));
     this.registerMarkdownPostProcessor((element, context) => {
+      if (studyRegistered && !element.closest(".markdown-source-view")) return;
       const callouts = [];
       if (element.matches(".callout[data-callout='exam-question']")) callouts.push(element);
       callouts.push(...Array.from(element.querySelectorAll(".callout[data-callout='exam-question']")));
@@ -5127,7 +5360,6 @@ var ExamNotesPlugin = class extends import_obsidian3.Plugin {
         this.addRenderedActions(callout, context.sourcePath, section?.lineStart);
       }
     });
-    await registerQuestionStudy(this);
     this.addSettingTab(new ExamNotesSettingTab(this.app, this));
     this.registerEvent(this.app.vault.on("create", (file) => {
       if (file.path.startsWith(SKILL_INBOX + "/")) void this.scanQuestionTrailInbox();
@@ -5428,7 +5660,7 @@ var ExamNotesPlugin = class extends import_obsidian3.Plugin {
       new import_obsidian3.Notice(`\u6DFB\u52A0\u811A\u6CE8\u5931\u8D25\uFF1A${String(error)}`);
     }
   }
-  async addRenderedActions(callout, sourcePath, sourceLine) {
+  addRenderedActions(callout, sourcePath, sourceLine) {
     if (callout.dataset.examActions === "true") return;
     const titleElement = callout.querySelector(".callout-title");
     const titleText = callout.querySelector(".callout-title-inner")?.textContent?.trim() || "";

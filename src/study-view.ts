@@ -2,26 +2,39 @@ import { MarkdownPostProcessorContext, MarkdownRenderChild, MarkdownRenderer, Ma
 import { codeFolding, foldEffect, unfoldEffect } from "@codemirror/language";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import type { Range, StateEffect } from "@codemirror/state";
-import { Letter, StudyGroup, StudyQuestion, letters, questionKey, studyGroups, studyQuestions } from "./study-model";
+import { Letter, StudyGroup, StudyQuestion, letters, questionKey } from "./study-model";
 import { StudyStore, getStudyStore } from "./study-store";
-import { extractBlockById } from "./markdown.js";
+import { StudyRenderCache, StudyRenderEntry, nativeQuestionParts, NearbyQuestions } from "./study-render-cache";
+
+function activeLivePreview(view: EditorView, plugin: Plugin): boolean {
+  const source = view.dom.closest<HTMLElement>(".markdown-source-view.is-live-preview");
+  if (!source || source.style.display === "none" || source.hidden || source.closest(".mod-hidden")) return false;
+  // During a file switch Obsidian may create the source editor before hiding it.
+  // Ask the owning view as well, so that temporary DOM state cannot start a parse.
+  return plugin.app.workspace.getLeavesOfType("markdown").some(leaf => {
+    const markdown = leaf.view as MarkdownView;
+    return markdown.getMode?.() === "source" && markdown.containerEl.contains(view.dom);
+  });
+}
 
 /** Apply the same neutral detail-callout style in Live Preview, where Markdown post-processors do not run. */
 class StudyExtraCalloutEditor {
   private source = "";
   private detailTypes = new Map<number, string>();
 
-  constructor(private view: EditorView) { this.refresh(); }
+  constructor(private view: EditorView, private cache: StudyRenderCache, private plugin: Plugin) { this.refresh(); }
 
   update(_update: ViewUpdate) { this.refresh(); }
 
   private refresh() {
+    if (!activeLivePreview(this.view, this.plugin)) return;
     const source = this.view.state.doc.toString();
     if (source !== this.source) {
       this.source = source;
       this.detailTypes = new Map();
-      const lines = source.split("\n");
-      for (const question of studyQuestions(source)) {
+      const path = this.plugin.app.workspace.getActiveFile()?.path ?? "";
+      const { lines, questions } = this.cache.get(path, source);
+      for (const question of questions) {
         for (const extra of question.extras) {
           if (extra.kind !== "detail") continue;
           const type = lines[extra.start]?.match(/^>\s*\[!(success|note)\]/)?.[1];
@@ -210,27 +223,32 @@ class StudyGroupEditor {
   private applied = new Map<string, { from: number; to: number }>();
   private pendingGroupControls = new WeakSet<HTMLElement>();
   private unsubscribe: (() => void) | null = null;
-  constructor(private view: EditorView, private plugin: Plugin, private store: StudyStore) {
+  private livePreview = false;
+  constructor(private view: EditorView, private plugin: Plugin, private store: StudyStore, private cache: StudyRenderCache) {
     this.unsubscribe = store.subscribe(() => this.refresh());
     this.refresh();
   }
   get lineDecorations() { return this.decorations; }
   update(update: ViewUpdate) {
     if (update.docChanged) this.applied = new Map([...this.applied].map(([key, range]) => [key, { from: update.changes.mapPos(range.from), to: update.changes.mapPos(range.to) }]));
-    if (update.docChanged || update.viewportChanged) this.refresh();
+    if (update.docChanged || update.viewportChanged || this.livePreview !== activeLivePreview(this.view, this.plugin)) this.refresh();
   }
   private refresh() {
-    const source = this.view.state.doc.toString();
-    if (source !== this.source) { this.source = source; this.groups = studyGroups(source); this.questions = studyQuestions(source); }
-    const groups = this.groups; const questions = this.questions;
     const file = this.plugin.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? this.plugin.app.workspace.getActiveFile();
     const path = file?.path ?? "";
-    const livePreview = !!this.view.dom.closest(".markdown-source-view.is-live-preview");
-    if (!livePreview) {
+    this.livePreview = activeLivePreview(this.view, this.plugin);
+    if (!this.livePreview) {
       this.decorations = Decoration.none;
-      this.syncFoldRanges([], path);
+      if (this.applied.size) this.syncFoldRanges([], path);
       return;
     }
+    const source = this.view.state.doc.toString();
+    if (source !== this.source) {
+      this.source = source;
+      const entry = this.cache.get(path, source);
+      this.questions = entry.questions; this.groups = entry.groups;
+    }
+    const groups = this.groups; const questions = this.questions;
     const lineDecorations: Range<Decoration>[] = [];
     for (const group of groups) {
       if (this.store.folded(path, group.materialId, "group")) continue;
@@ -289,11 +307,12 @@ class StudyGroupEditor {
   destroy() { this.unsubscribe?.(); this.unsubscribe = null; }
 }
 
-async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLElement, q: StudyQuestion, context: MarkdownPostProcessorContext) {
+async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLElement, q: StudyQuestion, context: MarkdownPostProcessorContext, entry: StudyRenderEntry) {
   if (callout.classList.contains("qt-study-question")) return;
   const content = callout.querySelector<HTMLElement>(":scope > .callout-content");
   const actions = callout.querySelector<HTMLElement>(":scope > .callout-title .exam-question-actions");
   if (!content || !actions) return;
+  const nativeParts = nativeQuestionParts(content, q.options.length);
   const key = questionKey(context.sourcePath, q.blockId);
   const child = new MarkdownRenderChild(callout); context.addChild(child);
   // Keep native footnote targets: rendering an isolated option lacks the file's definitions.
@@ -312,11 +331,7 @@ async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLEle
   let disposed = false;
   child.register(() => { disposed = true; });
   const body = node("div", "qt-study-body");
-  const sourceFile = plugin.app.vault.getAbstractFileByPath(context.sourcePath);
-  const source = sourceFile ? await plugin.app.vault.cachedRead(sourceFile as any) : "";
-  const blockCounts = new Map<string, number>();
-  source.split("\n").forEach(line => { const id = line.trim().match(/^\^([A-Za-z0-9_-]+)$/)?.[1]; if (id) blockCounts.set(id, (blockCounts.get(id) ?? 0) + 1); });
-  const material = q.materialIds.length === 1 && blockCounts.get(q.materialIds[0]) === 1 ? extractBlockById(source, q.materialIds[0]) : null;
+  const material = q.materialIds.length === 1 ? entry.material(q.materialIds[0]) : null;
   const materialDisclosure = material ? node("details", "qt-study-question-material") : null;
   let materialDisclosureTouched = false;
   if (material && materialDisclosure) {
@@ -335,7 +350,8 @@ async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLEle
   }
   const history = node("select", "qt-study-history"); history.setAttribute("aria-label", "作答记录"); history.title = "选择一次作答记录";
   const stem = node("div", "qt-study-stem"); body.append(stem);
-  await renderMarkdown(q.stem, stem);
+  if (nativeParts) stem.append(nativeParts[0]);
+  else await renderMarkdown(q.stem, stem);
   const rows: { letter: Letter; row: HTMLElement; pick: HTMLButtonElement; uncertain: HTMLButtonElement; wrong: HTMLButtonElement; result: HTMLElement }[] = [];
   for (const [index] of q.options.entries()) {
     const letter = letters[index];
@@ -343,7 +359,8 @@ async function mountQuestion(plugin: Plugin, store: StudyStore, callout: HTMLEle
     const pick = button(letter, () => { if (store.session(key).redo && !store.session(key).busy) store.pick(key, letter, q.kind); });
     pick.classList.add("qt-study-letter"); pick.setAttribute("aria-label", "选择 " + letter);
     const text = node("div", "qt-study-option-body");
-    await renderMarkdown(q.options[index], text);
+    if (nativeParts) text.append(nativeParts[index + 1]);
+    else await renderMarkdown(q.options[index], text);
     const result = node("span", "qt-study-result");
     text.append(result);
     const uncertain = button("不确定", () => { if (!store.session(key).busy) void store.toggleUncertain(key, q, letter).catch(report); });
@@ -477,29 +494,38 @@ function spaceTags(element: HTMLElement) {
   });
 }
 
-export async function registerQuestionStudy(plugin: Plugin) {
+export async function registerQuestionStudy(plugin: Plugin, addActions?: (callout: HTMLElement, path: string, line?: number) => void) {
   let store: StudyStore;
   try { store = await getStudyStore(plugin); }
-  catch (error) { console.error(error); new Notice("题迹：作答记录无法读取，已保留原数据；答题功能暂未启用"); return; }
+  catch (error) { console.error(error); new Notice("题迹：作答记录无法读取，已保留原数据；答题功能暂未启用"); return false; }
+  const cache = new StudyRenderCache();
   plugin.registerEditorExtension(codeFolding());
-  plugin.registerEditorExtension(ViewPlugin.fromClass(StudyExtraCalloutEditor));
-  class BoundStudyGroupEditor extends StudyGroupEditor { constructor(view: EditorView) { super(view, plugin, store); } }
+  class BoundStudyExtraCalloutEditor extends StudyExtraCalloutEditor { constructor(view: EditorView) { super(view, cache, plugin); } }
+  plugin.registerEditorExtension(ViewPlugin.fromClass(BoundStudyExtraCalloutEditor));
+  class BoundStudyGroupEditor extends StudyGroupEditor { constructor(view: EditorView) { super(view, plugin, store, cache); } }
   plugin.registerEditorExtension(ViewPlugin.fromClass(BoundStudyGroupEditor, { decorations: value => value.lineDecorations }));
-  let cachedSource = ""; let cachedQuestions: StudyQuestion[] = []; let cachedGroups: StudyGroup[] = [];
+  const nearby = new NearbyQuestions((element, resume) => {
+    const renderer = plugin.app.workspace.getLeavesOfType("markdown")
+      .map(leaf => (leaf.view as any)?.previewMode?.renderer)
+      .find(renderer => renderer?.sections.some((section: any) => section.el === element || section.el.contains(element)));
+    // Do not enhance the temporary first page while a block-link jump is pending.
+    if (renderer?.rendered) { renderer.onRendered(resume); return false; }
+    return true;
+  });
+  plugin.register(() => { nearby.destroy(); cache.clear(); });
   plugin.registerEvent(plugin.app.vault.on("rename", (file, oldPath) => { void store.rename(oldPath, file.path).catch(report); }));
-  plugin.registerMarkdownPostProcessor(async (element, context) => {
+  plugin.registerMarkdownPostProcessor((element, context) => {
     // Editable source retains native editing; nested Markdown rendering must not recurse.
     if (element.closest(".markdown-source-view, .qt-study-body, .qt-study-note-rendering")) return;
     const section = context.getSectionInfo(element);
     if (!section) return;
-    if (section.text !== cachedSource) { cachedSource = section.text; cachedQuestions = studyQuestions(section.text); cachedGroups = studyGroups(section.text); }
-    const questions = cachedQuestions;
-    const groups = cachedGroups;
+    const entry = cache.get(context.sourcePath, section.text);
+    const { questions } = entry;
     const callouts = [...(element.matches(".callout[data-callout='exam-question']") ? [element] : []), ...Array.from(element.querySelectorAll<HTMLElement>(".callout[data-callout='exam-question']"))];
     const materialCallouts = [...(element.matches(".callout[data-callout='exam-material']") ? [element] : []), ...Array.from(element.querySelectorAll<HTMLElement>(".callout[data-callout='exam-material']"))];
     for (const callout of materialCallouts) {
       const info = context.getSectionInfo(callout);
-      const group = groups.find(item => info && item.materialHeaderLine >= info.lineStart && item.materialHeaderLine <= info.lineEnd);
+      const group = info && entry.materialGroupAt(info.lineStart, info.lineEnd);
       if (!group || callout.querySelector(":scope > .callout-title .qt-study-group-controls")) continue;
       const child = new MarkdownRenderChild(callout); context.addChild(child);
       ensureGroupControls(plugin, callout, group, context.sourcePath, questions, store, cleanup => child.register(cleanup));
@@ -507,10 +533,19 @@ export async function registerQuestionStudy(plugin: Plugin) {
     for (const callout of callouts) {
       const info = context.getSectionInfo(callout);
       const title = callout.querySelector(":scope > .callout-title > .callout-title-inner")?.textContent?.trim();
-      const candidates = questions.filter(q => info && q.headerLine >= info.lineStart && q.headerLine <= info.lineEnd && q.title === title);
-      if (candidates.length === 1) await mountQuestion(plugin, store, callout, candidates[0], context);
+      const question = info && title ? entry.questionAt(title, info.lineStart, info.lineEnd) : null;
+      if (question || addActions) {
+        const lifecycle = new MarkdownRenderChild(callout); context.addChild(lifecycle);
+        let disposed = false;
+        lifecycle.register(() => { disposed = true; });
+        lifecycle.register(nearby.add(callout, async () => {
+          if (disposed) return;
+          addActions?.(callout, context.sourcePath, info?.lineStart);
+          if (question) await mountQuestion(plugin, store, callout, question, context, entry);
+        }));
+      }
     }
-    const grouped = groups.find(group => section.lineStart >= group.firstQuestionLine && section.lineEnd <= group.lastQuestionLine);
+    const grouped = entry.groupAt(section.lineStart, section.lineEnd);
     if (grouped) {
       const child = new MarkdownRenderChild(element); context.addChild(child);
       const inner = document.createElement("span"); inner.className = "qt-study-group-content";
@@ -531,45 +566,55 @@ export async function registerQuestionStudy(plugin: Plugin) {
       child.register(store.subscribe(updateGroup)); updateGroup();
       child.register(() => { element.classList.remove("qt-study-group-member", "qt-study-group-collapsed"); delete element.dataset.qtGroup; inner.replaceWith(...Array.from(inner.childNodes)); });
     }
-    const owner = questions.find(q => q.extras.some(extra => section.lineStart >= extra.start && section.lineEnd < extra.end));
+    const owned = entry.extraAt(section.lineStart, section.lineEnd);
+    const owner = owned?.question;
     if (!owner) return;
     const child = new MarkdownRenderChild(element); context.addChild(child);
     const key = questionKey(context.sourcePath, owner.blockId);
-    const metadata = owner.extras.some(extra => extra.kind === "metadata" && section.lineStart >= extra.start && section.lineEnd < extra.end);
-    const raw = section.text.split("\n").slice(section.lineStart, section.lineEnd + 1).join("\n");
-    if (metadata && /^标签[：:]\S/m.test(raw)) {
-      const original = Array.from(element.childNodes);
-      const normalized = node("div");
-      await MarkdownRenderer.render(plugin.app, raw.replace(/^(标签[：:])(?=\S)/gm, "$1 "), normalized, context.sourcePath, child);
-      element.replaceChildren(...Array.from(normalized.childNodes));
-      child.register(() => { element.replaceChildren(...original); });
-    }
+    const metadata = owned.extra.kind === "metadata";
+    const raw = entry.lines.slice(section.lineStart, section.lineEnd + 1).join("\n");
     const normalizedNote = normalizeIndentedNoteCallout(raw);
     const detailContent = element.querySelector<HTMLElement>(":scope > .callout-content");
-    if (normalizedNote && detailContent) {
-      const references = new Map<string, HTMLElement[]>();
-      detailContent.querySelectorAll<HTMLElement>("sup.footnote-ref").forEach(ref => {
-        const id = ref.querySelector("a")?.getAttribute("data-footref");
-        if (id) { const list = references.get(id) ?? []; list.push(ref); references.set(id, list); }
-      });
-      const definitions = [...references.keys()].map(id => `[^${id}]: .`).join("\n");
-      const normalized = node("div", "qt-study-note-rendering");
-      await MarkdownRenderer.render(plugin.app, normalizedNote + (definitions ? "\n\n" + definitions : ""), normalized, context.sourcePath, child);
-      normalized.querySelectorAll(".footnotes").forEach(el => el.remove());
-      normalized.querySelectorAll<HTMLElement>("sup.footnote-ref").forEach(ref => {
-        const id = ref.querySelector("a")?.getAttribute("data-footref");
-        const original = id && references.get(id)?.shift();
-        if (original) ref.replaceWith(original.cloneNode(true));
-      });
-      const original = Array.from(detailContent.childNodes);
-      detailContent.replaceChildren(...Array.from(normalized.childNodes));
-      child.register(() => { detailContent.replaceChildren(...original); });
-    }
-    element.classList.add("qt-study-extra"); spaceTags(element);
-    const lastExtra = owner.extras.at(-1);
-    if (lastExtra && section.lineStart >= lastExtra.start && section.lineEnd < lastExtra.end) element.classList.add("qt-study-question-end");
-    const update = () => { element.classList.toggle("qt-study-concealed", store.session(key).redo); };
-    child.register(store.subscribe(update)); update();
-    child.register(() => { element.classList.remove("qt-study-extra", "qt-study-concealed", "qt-study-question-end"); });
+    const finish = () => {
+      element.classList.add("qt-study-extra"); spaceTags(element);
+      const lastExtra = owner.extras.at(-1);
+      if (lastExtra && section.lineStart >= lastExtra.start && section.lineEnd < lastExtra.end) element.classList.add("qt-study-question-end");
+      const update = () => { element.classList.toggle("qt-study-concealed", store.session(key).redo); };
+      child.register(store.subscribe(update)); update();
+      child.register(() => { element.classList.remove("qt-study-extra", "qt-study-concealed", "qt-study-question-end"); });
+    };
+    // Returning a Promise makes Obsidian invalidate section measurements. Most
+    // sections only need synchronous classes/listeners and must not join that barrier.
+    if (!(metadata && /^标签[：:]\S/m.test(raw)) && !(normalizedNote && detailContent)) { finish(); return; }
+    return (async () => {
+      if (metadata && /^标签[：:]\S/m.test(raw)) {
+        const original = Array.from(element.childNodes);
+        const normalized = node("div");
+        await MarkdownRenderer.render(plugin.app, raw.replace(/^(标签[：:])(?=\S)/gm, "$1 "), normalized, context.sourcePath, child);
+        element.replaceChildren(...Array.from(normalized.childNodes));
+        child.register(() => { element.replaceChildren(...original); });
+      }
+      if (normalizedNote && detailContent) {
+        const references = new Map<string, HTMLElement[]>();
+        detailContent.querySelectorAll<HTMLElement>("sup.footnote-ref").forEach(ref => {
+          const id = ref.querySelector("a")?.getAttribute("data-footref");
+          if (id) { const list = references.get(id) ?? []; list.push(ref); references.set(id, list); }
+        });
+        const definitions = [...references.keys()].map(id => `[^${id}]: .`).join("\n");
+        const normalized = node("div", "qt-study-note-rendering");
+        await MarkdownRenderer.render(plugin.app, normalizedNote + (definitions ? "\n\n" + definitions : ""), normalized, context.sourcePath, child);
+        normalized.querySelectorAll(".footnotes").forEach(el => el.remove());
+        normalized.querySelectorAll<HTMLElement>("sup.footnote-ref").forEach(ref => {
+          const id = ref.querySelector("a")?.getAttribute("data-footref");
+          const original = id && references.get(id)?.shift();
+          if (original) ref.replaceWith(original.cloneNode(true));
+        });
+        const original = Array.from(detailContent.childNodes);
+        detailContent.replaceChildren(...Array.from(normalized.childNodes));
+        child.register(() => { detailContent.replaceChildren(...original); });
+      }
+      finish();
+    })();
   }, 20);
+  return true;
 }

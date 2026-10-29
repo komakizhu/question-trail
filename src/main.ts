@@ -52,7 +52,11 @@ export default class ExamNotesPlugin extends Plugin {
     } });
     this.addCommand({ id: "process-question-trail-sync", name: "处理题迹 Skill 同步", callback: () => void this.processQuestionTrailInbox() });
 
+    const studyRegistered = await registerQuestionStudy(this, (callout, path, line) => this.addRenderedActions(callout, path, line));
     this.registerMarkdownPostProcessor((element, context) => {
+      // Reading-view actions share the nearby study queue. Live Preview retains
+      // its native timing, and copy actions remain available if study data fails.
+      if (studyRegistered && !element.closest(".markdown-source-view")) return;
       const callouts: HTMLElement[] = [];
       if (element.matches(".callout[data-callout='exam-question']")) callouts.push(element);
       callouts.push(...Array.from(element.querySelectorAll<HTMLElement>(".callout[data-callout='exam-question']")));
@@ -62,7 +66,6 @@ export default class ExamNotesPlugin extends Plugin {
       }
     });
 
-    await registerQuestionStudy(this);
     this.addSettingTab(new ExamNotesSettingTab(this.app, this));
     this.registerEvent(this.app.vault.on("create", file => { if (file.path.startsWith(SKILL_INBOX + "/")) void this.scanQuestionTrailInbox(); }));
     this.registerEvent(this.app.vault.on("rename", file => { if (file.path.startsWith(SKILL_INBOX + "/")) void this.scanQuestionTrailInbox(); }));
@@ -302,7 +305,7 @@ export default class ExamNotesPlugin extends Plugin {
     }
   }
 
-  private async addRenderedActions(callout: HTMLElement, sourcePath: string, sourceLine?: number) {
+  private addRenderedActions(callout: HTMLElement, sourcePath: string, sourceLine?: number) {
     if (callout.dataset.examActions === "true") return;
     const titleElement = callout.querySelector<HTMLElement>(".callout-title");
     const titleText = callout.querySelector<HTMLElement>(".callout-title-inner")?.textContent?.trim() || "";

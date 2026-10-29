@@ -119,7 +119,7 @@ export function studyQuestions(source: string): StudyQuestion[] {
 }
 
 /** Group only contiguous, supported questions that each cite one unique earlier local exam-material block. */
-export function studyGroups(source: string): StudyGroup[] {
+export function studyGroups(source: string, questions = studyQuestions(source)): StudyGroup[] {
   const lines = source.split("\n");
   const callouts = findCallouts(source);
   const allBlockIds = new Map<string, number>();
@@ -135,7 +135,7 @@ export function studyGroups(source: string): StudyGroup[] {
     entries.push({ title, headerLine: record.line, endLine: blockLine }); materials.set(blockId, entries);
   }
   const parsed = findExamQuestions(source);
-  const supported = new Map(studyQuestions(source).map(question => [question.headerLine, question]));
+  const supported = new Map(questions.map(question => [question.headerLine, question]));
   const sequence = parsed.map(question => {
     const valid = supported.get(question.headerLine);
     const ids = question.materialIds;
